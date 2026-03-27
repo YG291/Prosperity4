@@ -2,23 +2,41 @@ from datamodel import OrderDepth, UserId, TradingState, Order
 from typing import List
 import string
 
+buy_sell_weight = 1/5
+#weight assigned to the buy_sell_ratio, in effect dims the impact of buy/sell
 
 class Trader:
 
     def bid(self):
         return 15
 
+    def buy_sell_ratio(self, state: TradingState, product):
+        orders = state.order_depths[product]
+        buys = orders.buy_orders
+        sells = orders.sell_orders
+        numbuys = abs(sum(buys.values()))
+        numsells = abs(sum(sells.values()))
+        if numbuys == 0:
+            numbuys = 0.2
+        if numsells == 0:
+            numsells = 0.2
+        return numbuys/numsells
+
+
     def fair_value(self, state: TradingState, product):
         orders = state.order_depths[product]
         buys = orders.buy_orders
         sells = orders.sell_orders
-        fair = 0
+        buy_component = 0
+        sell_component = 0
         total = abs(sum(buys.values())) + abs(sum(sells.values()))
+        ratiobuysell = self.buy_sell_ratio(state, product)
         for bprice in buys:
-            fair += abs(bprice * (buys[bprice] / total))
+            buy_component += abs(bprice * (buys[bprice]/total))
         for sprice in sells:
-            fair += abs(sprice*(sells[sprice]/total))
-        return fair
+            sell_component += abs(sprice*(sells[sprice]/total))
+        return (buy_sell_weight*buy_component*ratiobuysell + (1-buy_sell_weight)*buy_component+ sell_component)
+        #this only weighs the buy component of the price, not the whole price.
 
     def run(self, state: TradingState):
         """Only method required. It takes all buy and sell orders for all
@@ -39,23 +57,23 @@ class Trader:
                 len(order_depth.buy_orders)) + ", Sell order depth : " + str(
                 len(order_depth.sell_orders)))
 
-            buy_buffer = 10
+            buy_buffer = 1
             if len(order_depth.sell_orders) != 0:
                 buysorted = sorted(order_depth.sell_orders.items(), key=lambda x: x[0])
                 for index in range(len(buysorted)):
                     best_ask, best_ask_amount = buysorted[index][0], buysorted[index][1]
-                    if int(best_ask) < acceptable_price - buy_buffer:  # buying
+                    if int(best_ask) <= acceptable_price - buy_buffer:  # buying
                         print("BUY", str(-best_ask_amount) + "x", best_ask)
                         orders.append(Order(product, best_ask, -best_ask_amount))
                     else:
                         break
 
-            sell_buffer = 10
+            sell_buffer = 1
             if len(order_depth.buy_orders) != 0:
                 sellsorted = sorted(order_depth.buy_orders.items(), key=lambda x: x[0], reverse=True)
                 for index in range(len(sellsorted)):
                     best_bid, best_bid_amount = sellsorted[index][0], sellsorted[index][1]
-                    if int(best_bid) > acceptable_price + sell_buffer:  # shorting
+                    if int(best_bid) >= acceptable_price + sell_buffer:  # shorting
                         print("SELL", str(best_bid_amount) + "x", best_bid)
                         orders.append(Order(product, best_bid, -best_bid_amount))
                     else:
