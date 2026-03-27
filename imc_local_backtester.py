@@ -1,15 +1,10 @@
 from __future__ import annotations
 
 import argparse
-import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Protocol, Tuple
 
 import pandas as pd
-
-# ---------------------------
-# Minimal Prosperity-like data model
-# ---------------------------
 
 Symbol = str
 Product = str
@@ -55,11 +50,6 @@ class Strategy(Protocol):
         """Return (orders_by_symbol, conversions, traderData)."""
 
 
-# ---------------------------
-# CSV parsing
-# ---------------------------
-
-
 def _to_int_if_present(value: object) -> Optional[int]:
     if pd.isna(value):
         return None
@@ -67,15 +57,6 @@ def _to_int_if_present(value: object) -> Optional[int]:
 
 
 class PriceBookLoader:
-    """Load IMC-style price snapshots from semicolon-delimited CSV.
-
-    Expected columns include:
-      day, timestamp, product,
-      bid_price_1, bid_volume_1, ..., bid_price_3, bid_volume_3,
-      ask_price_1, ask_volume_1, ..., ask_price_3, ask_volume_3,
-      mid_price, profit_and_loss
-    """
-
     def __init__(self, csv_path: str):
         self.df = pd.read_csv(csv_path, sep=";")
         self._validate_columns()
@@ -85,7 +66,12 @@ class PriceBookLoader:
         required = {"timestamp", "product"}
         missing = required - set(self.df.columns)
         if missing:
-            raise ValueError(f"Missing required columns: {sorted(missing)}")
+            raise ValueError(
+                f"Missing required columns in prices CSV: {sorted(missing)}"
+            )
+
+    def get_products(self) -> List[str]:
+        return sorted(self.df["product"].astype(str).unique().tolist())
 
     def iter_snapshots(self):
         for timestamp, group in self.df.groupby("timestamp", sort=True):
@@ -105,7 +91,6 @@ class PriceBookLoader:
                     if bp is not None and bv is not None and bv != 0:
                         depth.buy_orders[bp] = bv
                     if ap is not None and av is not None and av != 0:
-                        # Prosperity convention: sell quantities are negative.
                         depth.sell_orders[ap] = -abs(av)
 
                 order_depths[product] = depth
@@ -115,36 +100,77 @@ class PriceBookLoader:
             yield int(timestamp), order_depths, mids
 
 
-# ---------------------------
-# Execution + backtest engine
-# ---------------------------
+class MarketTradeLoader:
+    def __init__(self, csv_path: str):
+        self.df = pd.read_csv(csv_path, sep=";")
+        self._validate_columns()
+        self.df = self.df.sort_values(["timestamp", "symbol"]).reset_index(drop=True)
+
+        for col in ("buyer", "seller"):
+            if col not in self.df.columns:
+                self.df[col] = ""
+
+    def _validate_columns(self) -> None:
+        required = {"timestamp", "symbol", "price", "quantity"}
+        missing = required - set(self.df.columns)
+        if missing:
+            raise ValueError(
+                f"Missing required columns in trades CSV: {sorted(missing)}"
+            )
+
+    def trades_at(self, timestamp: int) -> Dict[str, List[Trade]]:
+        ts_rows = self.df[self.df["timestamp"] == timestamp]
+        out: Dict[str, List[Trade]] = {}
+
+        for _, row in ts_rows.iterrows():
+            symbol = str(row["symbol"])
+            out.setdefault(symbol, []).append(
+                Trade(
+                    symbol=symbol,
+                    price=int(row["price"]),
+                    quantity=int(row["quantity"]),
+                    buyer="" if pd.isna(row["buyer"]) else str(row["buyer"]),
+                    seller="" if pd.isna(row["seller"]) else str(row["seller"]),
+                    timestamp=int(row["timestamp"]),
+                )
+            )
+
+        return out
 
 
 class Backtester:
     def __init__(
         self,
         price_csv: str,
+        trade_csv: str,
         position_limits: Dict[str, int],
         mark_to_mid: bool = True,
     ) -> None:
-        self.loader = PriceBookLoader(price_csv)
+        self.price_loader = PriceBookLoader(price_csv)
+        self.trade_loader = MarketTradeLoader(trade_csv)
         self.position_limits = position_limits
         self.mark_to_mid = mark_to_mid
 
     def run(self, strategy: Strategy) -> pd.DataFrame:
-        position: Dict[str, int] = {product: 0 for product in self.position_limits}
+        products = self.price_loader.get_products()
+        position: Dict[str, int] = {product: 0 for product in products}
+        for product in self.position_limits:
+            position.setdefault(product, 0)
+
         cash = 0.0
         trader_data = ""
         own_trades_prev: Dict[str, List[Trade]] = {}
         rows: List[dict] = []
 
-        for timestamp, order_depths, mids in self.loader.iter_snapshots():
+        for timestamp, order_depths, mids in self.price_loader.iter_snapshots():
+            market_trades = self.trade_loader.trades_at(timestamp)
+
             state = TradingState(
                 traderData=trader_data,
                 timestamp=timestamp,
                 order_depths=order_depths,
                 own_trades=own_trades_prev,
-                market_trades={},  # not available from price snapshots alone
+                market_trades=market_trades,
                 position=position.copy(),
                 observations={"mid_prices": mids},
             )
@@ -177,17 +203,19 @@ class Backtester:
                     if mid is not None:
                         mtm += pos * mid
 
-            rows.append(
-                {
-                    "timestamp": timestamp,
-                    "cash": cash,
-                    "mtm": mtm,
-                    "total_pnl": cash + mtm,
-                    **{f"pos_{p}": position.get(p, 0) for p in sorted(position)},
-                    "trade_count": sum(len(v) for v in own_trades_now.values()),
-                }
-            )
+            row = {
+                "timestamp": timestamp,
+                "cash": cash,
+                "mtm": mtm,
+                "total_pnl": cash + mtm,
+                "trade_count": sum(len(v) for v in own_trades_now.values()),
+                "market_trade_count": sum(len(v) for v in market_trades.values()),
+            }
 
+            for product in sorted(position):
+                row[f"pos_{product}"] = position.get(product, 0)
+
+            rows.append(row)
             own_trades_prev = own_trades_now
 
         return pd.DataFrame(rows)
@@ -197,13 +225,13 @@ class Backtester:
         position: Dict[str, int],
         orders_by_symbol: Dict[str, List[Order]],
     ) -> Dict[str, List[Order]]:
-        """Reject all buy orders or all sell orders on a symbol if side aggregate breaches limits."""
         accepted: Dict[str, List[Order]] = {}
 
         for symbol, orders in orders_by_symbol.items():
             pos = position.get(symbol, 0)
             limit = self.position_limits.get(symbol)
             if limit is None:
+                accepted[symbol] = []
                 continue
 
             total_buy = sum(max(order.quantity, 0) for order in orders)
@@ -218,6 +246,7 @@ class Backtester:
                     filtered.append(order)
                 elif order.quantity < 0 and sell_ok:
                     filtered.append(order)
+
             accepted[symbol] = filtered
 
         return accepted
@@ -230,8 +259,9 @@ class Backtester:
     ) -> Tuple[Dict[str, List[Trade]], float]:
         """Execute immediately against visible book only.
 
-        Limitation: with only order-book snapshots, we cannot simulate bots later hitting
-        your resting quotes. Unfilled remainder is cancelled.
+        Market trades from the trades CSV are passed to the strategy as context
+        through state.market_trades, but this engine still only fills your orders
+        against the visible order book in the prices CSV.
         """
         own_trades: Dict[str, List[Trade]] = {}
         cash_delta = 0.0
@@ -247,66 +277,66 @@ class Backtester:
                 remaining = abs(order.quantity)
 
                 if order.quantity > 0:
-                    # Buy order hits asks priced <= limit price.
-                    for ask_price, ask_volume_signed in asks:
-                        if remaining == 0 or ask_price > order.price:
+                    ask_index = 0
+                    while remaining > 0 and ask_index < len(asks):
+                        ask_price, ask_volume_signed = asks[ask_index]
+                        if ask_price > order.price:
                             break
                         available = abs(ask_volume_signed)
+                        if available <= 0:
+                            ask_index += 1
+                            continue
+
                         fill = min(remaining, available)
-                        if fill > 0:
-                            trades.append(
-                                Trade(
-                                    symbol=symbol,
-                                    price=ask_price,
-                                    quantity=fill,
-                                    buyer="SUBMISSION",
-                                    seller="BOT",
-                                    timestamp=timestamp,
-                                )
+                        trades.append(
+                            Trade(
+                                symbol=symbol,
+                                price=ask_price,
+                                quantity=fill,
+                                buyer="SUBMISSION",
+                                seller="BOT",
+                                timestamp=timestamp,
                             )
-                            cash_delta -= fill * ask_price
-                            remaining -= fill
-                    # Resting remainder ignored/cancelled.
+                        )
+                        cash_delta -= fill * ask_price
+                        remaining -= fill
+                        asks[ask_index] = (ask_price, -(available - fill))
+                        if available - fill == 0:
+                            ask_index += 1
                 else:
-                    # Sell order hits bids priced >= limit price.
-                    for bid_price, bid_volume in bids:
-                        if remaining == 0 or bid_price < order.price:
+                    bid_index = 0
+                    while remaining > 0 and bid_index < len(bids):
+                        bid_price, bid_volume = bids[bid_index]
+                        if bid_price < order.price:
                             break
                         available = bid_volume
+                        if available <= 0:
+                            bid_index += 1
+                            continue
+
                         fill = min(remaining, available)
-                        if fill > 0:
-                            trades.append(
-                                Trade(
-                                    symbol=symbol,
-                                    price=bid_price,
-                                    quantity=fill,
-                                    buyer="BOT",
-                                    seller="SUBMISSION",
-                                    timestamp=timestamp,
-                                )
+                        trades.append(
+                            Trade(
+                                symbol=symbol,
+                                price=bid_price,
+                                quantity=fill,
+                                buyer="BOT",
+                                seller="SUBMISSION",
+                                timestamp=timestamp,
                             )
-                            cash_delta += fill * bid_price
-                            remaining -= fill
-                    # Resting remainder ignored/cancelled.
+                        )
+                        cash_delta += fill * bid_price
+                        remaining -= fill
+                        bids[bid_index] = (bid_price, available - fill)
+                        if available - fill == 0:
+                            bid_index += 1
 
             own_trades[symbol] = trades
 
         return own_trades, cash_delta
 
 
-# ---------------------------
-# Example strategy
-# ---------------------------
-
-
 class NaiveFairValueStrategy:
-    """Very simple example:
-    - fair value = rounded mid-price if both sides exist
-    - buy best ask if ask < fair - edge
-    - sell best bid if bid > fair + edge
-    - otherwise do nothing
-    """
-
     def __init__(self, edge: int = 0, max_clip: int = 5):
         self.edge = edge
         self.max_clip = max_clip
@@ -316,38 +346,38 @@ class NaiveFairValueStrategy:
 
         for symbol, depth in state.order_depths.items():
             orders: List[Order] = []
-            pos = state.position.get(symbol, 0)
+
             mid = state.observations.get("mid_prices", {}).get(symbol)
+            if mid is None and state.market_trades.get(symbol):
+                mid = state.market_trades[symbol][-1].price
             if mid is None:
+                result[symbol] = orders
                 continue
+
             fair = int(round(mid))
 
             if depth.sell_orders:
                 best_ask = min(depth.sell_orders)
                 ask_volume = abs(depth.sell_orders[best_ask])
                 if best_ask < fair - self.edge:
-                    qty = min(self.max_clip, ask_volume)
-                    orders.append(Order(symbol, best_ask, qty))
+                    orders.append(
+                        Order(symbol, best_ask, min(self.max_clip, ask_volume))
+                    )
 
             if depth.buy_orders:
                 best_bid = max(depth.buy_orders)
                 bid_volume = depth.buy_orders[best_bid]
                 if best_bid > fair + self.edge:
-                    qty = min(self.max_clip, bid_volume)
-                    orders.append(Order(symbol, best_bid, -qty))
+                    orders.append(
+                        Order(symbol, best_bid, -min(self.max_clip, bid_volume))
+                    )
 
             result[symbol] = orders
 
         return result, 0, state.traderData
 
 
-# ---------------------------
-# CLI
-# ---------------------------
-
-
 def parse_limits(text: str) -> Dict[str, int]:
-    """Parse AMETHYSTS=20,STARFRUIT=20 style input."""
     out: Dict[str, int] = {}
     for chunk in text.split(","):
         chunk = chunk.strip()
@@ -360,9 +390,10 @@ def parse_limits(text: str) -> Dict[str, int]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Local backtester for IMC-style price CSVs."
+        description="Local backtester for IMC-style prices + trades CSVs."
     )
     parser.add_argument("price_csv", help="Semicolon-delimited prices CSV")
+    parser.add_argument("trade_csv", help="Semicolon-delimited trades CSV")
     parser.add_argument(
         "--limits",
         required=True,
@@ -381,7 +412,11 @@ def main() -> None:
 
     limits = parse_limits(args.limits)
     strategy = NaiveFairValueStrategy(edge=args.edge, max_clip=args.max_clip)
-    engine = Backtester(args.price_csv, position_limits=limits)
+    engine = Backtester(
+        price_csv=args.price_csv,
+        trade_csv=args.trade_csv,
+        position_limits=limits,
+    )
     results = engine.run(strategy)
     results.to_csv(args.out, index=False)
 
