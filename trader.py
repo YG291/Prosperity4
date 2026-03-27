@@ -39,17 +39,27 @@ class Trader:
                 len(order_depth.buy_orders)) + ", Sell order depth : " + str(
                 len(order_depth.sell_orders)))
 
+            buy_buffer = 10
             if len(order_depth.sell_orders) != 0:
-                best_ask, best_ask_amount = list(order_depth.sell_orders.items())[0]
-                if int(best_ask) < acceptable_price:  # buying
-                    print("BUY", str(-best_ask_amount) + "x", best_ask)
-                    orders.append(Order(product, best_ask, -best_ask_amount))
+                buysorted = sorted(order_depth.sell_orders.items(), key=lambda x: x[0])
+                for index in range(len(buysorted)):
+                    best_ask, best_ask_amount = buysorted[index][0], buysorted[index][1]
+                    if int(best_ask) < acceptable_price - buy_buffer:  # buying
+                        print("BUY", str(-best_ask_amount) + "x", best_ask)
+                        orders.append(Order(product, best_ask, -best_ask_amount))
+                    else:
+                        break
 
+            sell_buffer = 10
             if len(order_depth.buy_orders) != 0:
-                best_bid, best_bid_amount = list(order_depth.buy_orders.items())[0]
-                if int(best_bid) > acceptable_price:  # shorting
-                    print("SELL", str(best_bid_amount) + "x", best_bid)
-                    orders.append(Order(product, best_bid, -best_bid_amount))
+                sellsorted = sorted(order_depth.buy_orders.items(), key=lambda x: x[0], reverse=True)
+                for index in range(len(sellsorted)):
+                    best_bid, best_bid_amount = sellsorted[index][0], sellsorted[index][1]
+                    if int(best_bid) > acceptable_price + sell_buffer:  # shorting
+                        print("SELL", str(best_bid_amount) + "x", best_bid)
+                        orders.append(Order(product, best_bid, -best_bid_amount))
+                    else:
+                        break
 
             result[product] = orders
 
