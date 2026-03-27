@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Protocol, Tuple
-
+from trader import Trader
 import pandas as pd
 
 Symbol = str
@@ -411,7 +411,7 @@ def main() -> None:
     args = parser.parse_args()
 
     limits = parse_limits(args.limits)
-    strategy = NaiveFairValueStrategy(edge=args.edge, max_clip=args.max_clip)
+    strategy = Trader()
     engine = Backtester(
         price_csv=args.price_csv,
         trade_csv=args.trade_csv,
