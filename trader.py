@@ -1,9 +1,9 @@
 from datamodel import OrderDepth, UserId, TradingState, Order
 from typing import List
 import string
-
-buy_sell_weight = 1/5
-#weight assigned to the buy_sell_ratio, in effect dims the impact of buy/sell
+import jsonpickle
+import statistics
+from statistics import linear_regression
 
 class Trader:
 
@@ -35,8 +35,20 @@ class Trader:
             buy_component += abs(bprice * (buys[bprice]/total))
         for sprice in sells:
             sell_component += abs(sprice*(sells[sprice]/total))
-        return (buy_sell_weight*buy_component*ratiobuysell + (1-buy_sell_weight)*buy_component+ sell_component)
-        #this only weighs the buy component of the price, not the whole price.
+        return buy_component + buy_component + sell_component
+
+    def regression(self, product, storage):
+        linmodel = linear_regression([int(x) for x in storage[product].keys()], list(storage[product].values()))
+        return (linmodel.intercept, linmodel.slope)
+
+    def compute_mid(self, storage, bsort, ssort, stamp):
+        if not bsort and not ssort:
+            return storage[stamp-100]
+        if not bsort:
+            return ssort[0][0]
+        if not ssort:
+            return bsort[0][0]
+        return (bsort[0][0]+ssort[0][0])/2
 
     def run(self, state: TradingState):
         """Only method required. It takes all buy and sell orders for all
@@ -48,18 +60,32 @@ class Trader:
 
         # Orders to be placed on exchange matching engine
         result = {}
+        storage = jsonpickle.decode(state.traderData) if state.traderData else {"EMERALDS": dict(),
+                                                                              "TOMATOES": dict()}
         for product in state.order_depths:
             order_depth: OrderDepth = state.order_depths[product]
+            buysorted = sorted(order_depth.sell_orders.items(), key=lambda x: x[0])
+            sellsorted = sorted(order_depth.buy_orders.items(), key=lambda x: x[0], reverse=True)
+            mid = self.compute_mid(storage, buysorted, sellsorted, state.timestamp)
+            storage[product][int(state.timestamp)] = mid
+
+            if len(storage[product]) < 2:
+                break
+
+            if len(storage[product]) > 100:
+                storage[product].pop(next(iter(storage[product])))
+            intercept, slope = self.regression(product, storage)
+            prediction = slope*int(state.timestamp) + intercept
+
             orders: List[Order] = []  # Order(symbol, price, quantity)
-            acceptable_price = self.fair_value(state, product)  # Participant should calculate this value
+            acceptable_price = prediction  # Participant should calculate this value
             print("Acceptable price : " + str(acceptable_price))
             print("Buy Order depth : " + str(
                 len(order_depth.buy_orders)) + ", Sell order depth : " + str(
                 len(order_depth.sell_orders)))
 
-            buy_buffer = 1
+            buy_buffer = 3
             if len(order_depth.sell_orders) != 0:
-                buysorted = sorted(order_depth.sell_orders.items(), key=lambda x: x[0])
                 for index in range(len(buysorted)):
                     best_ask, best_ask_amount = buysorted[index][0], buysorted[index][1]
                     if int(best_ask) <= acceptable_price - buy_buffer:  # buying
@@ -68,9 +94,8 @@ class Trader:
                     else:
                         break
 
-            sell_buffer = 1
+            sell_buffer = 3
             if len(order_depth.buy_orders) != 0:
-                sellsorted = sorted(order_depth.buy_orders.items(), key=lambda x: x[0], reverse=True)
                 for index in range(len(sellsorted)):
                     best_bid, best_bid_amount = sellsorted[index][0], sellsorted[index][1]
                     if int(best_bid) >= acceptable_price + sell_buffer:  # shorting
@@ -80,7 +105,7 @@ class Trader:
                         break
 
             result[product] = orders
-
-        traderData = ""  # No state needed - we check position directly
+        traderData = jsonpickle.encode(storage)
+        # No state needed - we check position directly
         conversions = 0
         return result, conversions, traderData
