@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import pandas as pd
 
@@ -36,6 +37,19 @@ def parse_args() -> argparse.Namespace:
         "--no-show",
         action="store_true",
         help="Do not open chart windows.",
+    )
+    parser.add_argument(
+        "--candlestick",
+        type=Path,
+        metavar="PRICES_CSV",
+        default=None,
+        help="Path to the semicolon-delimited prices CSV; enables candlestick charts per product.",
+    )
+    parser.add_argument(
+        "--candle-period",
+        type=int,
+        default=1000,
+        help="Timestamp units per candlestick (default: 1000).",
     )
     return parser.parse_args()
 
@@ -65,11 +79,48 @@ def save_or_show(fig: plt.Figure, filename: str | None, no_show: bool) -> None:
 
 
 def plot_total_pnl(df: pd.DataFrame, save_prefix: str, no_show: bool) -> None:
-    fig = plt.figure(figsize=(10, 5))
-    plt.plot(df["timestamp"], df["total_pnl"])
-    plt.xlabel("Timestamp")
-    plt.ylabel("Total PnL")
-    plt.title("Backtest Total PnL")
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(df["timestamp"], df["total_pnl"], label="Total PnL", zorder=2)
+
+    legend_handles = []
+    if "buy_count" in df.columns and "sell_count" in df.columns:
+        buys = df[df["buy_count"] > 0]
+        sells = df[df["sell_count"] > 0]
+
+        if not buys.empty:
+            ax.scatter(
+                buys["timestamp"],
+                buys["total_pnl"],
+                marker="^",
+                color="green",
+                s=60,
+                zorder=3,
+                label="Buy",
+            )
+            legend_handles.append(
+                mpatches.Patch(color="green", label="Buy")
+            )
+
+        if not sells.empty:
+            ax.scatter(
+                sells["timestamp"],
+                sells["total_pnl"],
+                marker="v",
+                color="red",
+                s=60,
+                zorder=3,
+                label="Sell",
+            )
+            legend_handles.append(
+                mpatches.Patch(color="red", label="Sell")
+            )
+
+    if legend_handles:
+        ax.legend(handles=legend_handles)
+
+    ax.set_xlabel("Timestamp")
+    ax.set_ylabel("Total PnL")
+    ax.set_title("Backtest Total PnL")
 
     filename = f"{save_prefix}_pnl.png" if save_prefix else None
     save_or_show(fig, filename, no_show)
@@ -121,9 +172,103 @@ def plot_positions(df: pd.DataFrame, save_prefix: str, no_show: bool) -> None:
         plt.ylabel("Position")
         plt.title(f"Position: {col.removeprefix('pos_')}")
 
-        filename = (
-            f"{save_prefix}_{col.lower()}.png" if save_prefix else None
+        filename = f"{save_prefix}_{col.lower()}.png" if save_prefix else None
+        save_or_show(fig, filename, no_show)
+
+
+def _draw_candles(ax: plt.Axes, ohlc: pd.DataFrame, ts_col: str, width: float) -> None:
+    for _, row in ohlc.iterrows():
+        ts = row[ts_col]
+        color = "green" if row["close"] >= row["open"] else "red"
+        body_bottom = min(row["open"], row["close"])
+        body_height = abs(row["close"] - row["open"]) or 0.01  # avoid invisible body
+
+        ax.add_patch(
+            mpatches.Rectangle(
+                (ts - width / 2, body_bottom),
+                width,
+                body_height,
+                color=color,
+                zorder=2,
+            )
         )
+        # Upper and lower wicks
+        ax.plot([ts, ts], [row["low"], body_bottom], color=color, linewidth=1, zorder=1)
+        ax.plot(
+            [ts, ts],
+            [body_bottom + body_height, row["high"]],
+            color=color,
+            linewidth=1,
+            zorder=1,
+        )
+
+
+def plot_candlestick(
+    prices_csv: Path,
+    df_results: pd.DataFrame,
+    candle_period: int,
+    save_prefix: str,
+    no_show: bool,
+) -> None:
+    prices = pd.read_csv(prices_csv, sep=";")
+
+    if "mid_price" not in prices.columns:
+        print("No mid_price column in prices CSV — skipping candlestick charts.")
+        return
+
+    prices = prices.sort_values(["product", "timestamp"])
+
+    for product, prod_df in prices.groupby("product"):
+        prod_df = prod_df[["timestamp", "mid_price"]].dropna().reset_index(drop=True)
+        if prod_df.empty:
+            continue
+
+        t0 = prod_df["timestamp"].iloc[0]
+        prod_df["bucket"] = (prod_df["timestamp"] - t0) // candle_period
+
+        ohlc = (
+            prod_df.groupby("bucket")["mid_price"]
+            .agg(open="first", high="max", low="min", close="last")
+            .reset_index()
+        )
+        # Represent each candle by the first timestamp in its bucket
+        bucket_start = prod_df.groupby("bucket")["timestamp"].first().reset_index()
+        ohlc = ohlc.merge(bucket_start, on="bucket")
+
+        fig, ax = plt.subplots(figsize=(12, 6))
+        _draw_candles(ax, ohlc, ts_col="timestamp", width=candle_period * 0.7)
+
+        # Overlay buy/sell markers from results if available
+        if "buy_count" in df_results.columns and "sell_count" in df_results.columns:
+            # Find per-product price at each trade timestamp using mid_price
+            price_at = prod_df.set_index("timestamp")["mid_price"]
+
+            for side, marker, color, label in (
+                ("buy_count", "^", "lime", "Buy"),
+                ("sell_count", "v", "red", "Sell"),
+            ):
+                trade_ts = df_results[df_results[side] > 0]["timestamp"]
+                matched = trade_ts[trade_ts.isin(price_at.index)]
+                if not matched.empty:
+                    ax.scatter(
+                        matched,
+                        price_at.loc[matched].values,
+                        marker=marker,
+                        color=color,
+                        s=70,
+                        zorder=4,
+                        label=label,
+                        edgecolors="black",
+                        linewidths=0.5,
+                    )
+            ax.legend()
+
+        ax.autoscale_view()
+        ax.set_xlabel("Timestamp")
+        ax.set_ylabel("Price")
+        ax.set_title(f"Candlestick: {product}  (period={candle_period})")
+
+        filename = f"{save_prefix}_candle_{str(product).lower()}.png" if save_prefix else None
         save_or_show(fig, filename, no_show)
 
 
@@ -137,7 +282,7 @@ def print_summary(df: pd.DataFrame) -> None:
     print(f"Final total PnL: {last['total_pnl']:.2f}")
     print(f"Total trades across steps: {int(df['trade_count'].sum())}")
 
-    position_cols = [col for col in df.columns if col.startswith('pos_')]
+    position_cols = [col for col in df.columns if col.startswith("pos_")]
     if position_cols:
         print("Final positions:")
         for col in position_cols:
@@ -154,6 +299,15 @@ def main() -> None:
     plot_mtm(df, args.save_prefix, args.no_show)
     plot_trade_count(df, args.save_prefix, args.no_show)
     plot_positions(df, args.save_prefix, args.no_show)
+
+    if args.candlestick:
+        plot_candlestick(
+            args.candlestick,
+            df,
+            args.candle_period,
+            args.save_prefix,
+            args.no_show,
+        )
 
 
 if __name__ == "__main__":
