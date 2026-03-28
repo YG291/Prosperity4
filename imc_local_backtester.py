@@ -10,15 +10,11 @@ from dataclasses import dataclass, field
 
 # Typing tools for clearer code and strategy interface definitions.
 from typing import Dict, List, Optional, Protocol, Tuple
-<<<<<<< Updated upstream
-from trader import Trader
-=======
 
 # pandas is used to read and manipulate CSV data.
->>>>>>> Stashed changes
 import pandas as pd
 
-from trader import buy_sell_weight
+from trader import Trader
 
 # Type aliases to make the code easier to read.
 # These do not create new types; they are just descriptive names.
@@ -776,15 +772,8 @@ def main() -> None:
 
     # Parse limits into a dictionary.
     limits = parse_limits(args.limits)
-<<<<<<< Updated upstream
     strategy = Trader()
-=======
 
-    # Create example strategy.
-    strategy = CoolTrader()
-
-    # Create backtesting engine.
->>>>>>> Stashed changes
     engine = Backtester(
         price_csv=args.price_csv,
         trade_csv=args.trade_csv,
