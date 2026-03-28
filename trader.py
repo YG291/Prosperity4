@@ -55,9 +55,6 @@ class Trader:
         symbols as an input, and outputs a list of orders to be sent."""
         #MAKE SURE THAT YOU CALL ALL OF YOUR METHODS HERE TO DETERMINE HOW TO BUY/SELL
 
-        print("traderData: " + state.traderData)
-        print("Observations: " + str(state.observations))
-
         # Orders to be placed on exchange matching engine
         result = {}
         storage = jsonpickle.decode(state.traderData) if state.traderData else {"EMERALDS": dict(),
@@ -79,12 +76,8 @@ class Trader:
 
             orders: List[Order] = []  # Order(symbol, price, quantity)
             acceptable_price = prediction  # Participant should calculate this value
-            print("Acceptable price : " + str(acceptable_price))
-            print("Buy Order depth : " + str(
-                len(order_depth.buy_orders)) + ", Sell order depth : " + str(
-                len(order_depth.sell_orders)))
 
-            buy_buffer = 3
+            buy_buffer = 1
             if len(order_depth.sell_orders) != 0:
                 for index in range(len(buysorted)):
                     best_ask, best_ask_amount = buysorted[index][0], buysorted[index][1]
@@ -94,7 +87,7 @@ class Trader:
                     else:
                         break
 
-            sell_buffer = 3
+            sell_buffer = 1
             if len(order_depth.buy_orders) != 0:
                 for index in range(len(sellsorted)):
                     best_bid, best_bid_amount = sellsorted[index][0], sellsorted[index][1]
