@@ -94,33 +94,19 @@ class Trader:
         - product is EMERALDS
         - if len(storage[product]) < 2
         """
-        if len(storage[product]) > 50:
-            storage[product].pop(next(iter(storage[product])))
-        intercept, slope = self.regression(product, storage)
-        prediction = slope * int(state.timestamp) + intercept
-
         orders: List[Order] = []  # Order(symbol, price, quantity)
-        acceptable_price = prediction  # Participant should calculate this value
 
-        buy_buffer = 1
         if len(order_depth.sell_orders) != 0:
-            for index in range(len(buysorted)):
-                best_ask, best_ask_amount = buysorted[index][0], buysorted[index][1]
-                if int(best_ask) <= acceptable_price - buy_buffer:  # buying
-                    print("BUY", str(-best_ask_amount) + "x", best_ask)
-                    orders.append(Order(product, best_ask, -best_ask_amount))
-                else:
-                    break
-
-        sell_buffer = 1
-        if len(order_depth.buy_orders) != 0:
             for index in range(len(sellsorted)):
                 best_bid, best_bid_amount = sellsorted[index][0], sellsorted[index][1]
-                if int(best_bid) >= acceptable_price + sell_buffer:  # shorting
-                    print("SELL", str(best_bid_amount) + "x", best_bid)
-                    orders.append(Order(product, best_bid, -best_bid_amount))
-                else:
-                    break
+                print("BUY", str(-best_bid_amount) + "x", best_bid)
+                orders.append(Order(product, best_bid + 1, -best_bid_amount))
+
+        if len(order_depth.buy_orders) != 0:
+            for index in range(len(buysorted)):
+                best_ask, best_ask_amount = buysorted[index][0], buysorted[index][1]
+                print("SELL", str(-best_ask_amount) + "x", best_ask)
+                orders.append(Order(product, best_ask - 1, -best_ask_amount))
 
         result[product] = orders
 
@@ -150,8 +136,13 @@ class Trader:
                 result[product] = orders
 
             if product == 'EMERALDS':
-                orders = []
-                result[product] = orders
+                order_depth: OrderDepth = state.order_depths[product]
+                buysorted = sorted(order_depth.sell_orders.items(), key=lambda x: x[0])
+                sellsorted = sorted(order_depth.buy_orders.items(), key=lambda x: x[0],
+                                    reverse=True)
+                mid = self.compute_mid(storage, buysorted, sellsorted, state.timestamp)
+                storage[product][int(state.timestamp)] = mid
+                self.trade_emeralds(state, storage, result, order_depth, buysorted, sellsorted)
 
         traderData = jsonpickle.encode(storage)
         # No state needed - we check position directly
