@@ -69,7 +69,7 @@ class Trader:
             if len(storage[product]) < 2:
                 break
 
-            if len(storage[product]) > 100:
+            if len(storage[product]) > 25:
                 storage[product].pop(next(iter(storage[product])))
             intercept, slope = self.regression(product, storage)
             prediction = slope*int(state.timestamp) + intercept
