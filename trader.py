@@ -99,13 +99,11 @@ class Trader:
         if len(order_depth.sell_orders) != 0:
             for index in range(len(sellsorted)):
                 best_bid, best_bid_amount = sellsorted[index][0], sellsorted[index][1]
-                print("BUY", str(-best_bid_amount) + "x", best_bid)
                 orders.append(Order(product, best_bid + 1, -best_bid_amount))
 
         if len(order_depth.buy_orders) != 0:
             for index in range(len(buysorted)):
                 best_ask, best_ask_amount = buysorted[index][0], buysorted[index][1]
-                print("SELL", str(-best_ask_amount) + "x", best_ask)
                 orders.append(Order(product, best_ask - 1, -best_ask_amount))
 
         result[product] = orders
