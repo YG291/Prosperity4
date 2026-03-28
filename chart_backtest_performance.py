@@ -238,16 +238,19 @@ def plot_candlestick(
         fig, ax = plt.subplots(figsize=(12, 6))
         _draw_candles(ax, ohlc, ts_col="timestamp", width=candle_period * 0.7)
 
-        # Overlay buy/sell markers from results if available
-        if "buy_count" in df_results.columns and "sell_count" in df_results.columns:
-            # Find per-product price at each trade timestamp using mid_price
+        # Overlay buy/sell markers using per-product columns if available,
+        # falling back to aggregate columns for older result files.
+        buy_col = f"buy_count_{product}" if f"buy_count_{product}" in df_results.columns else "buy_count"
+        sell_col = f"sell_count_{product}" if f"sell_count_{product}" in df_results.columns else "sell_count"
+
+        if buy_col in df_results.columns and sell_col in df_results.columns:
             price_at = prod_df.set_index("timestamp")["mid_price"]
 
-            for side, marker, color, label in (
-                ("buy_count", "^", "lime", "Buy"),
-                ("sell_count", "v", "red", "Sell"),
+            for col, marker, color, label in (
+                (buy_col, "^", "lime", "Buy"),
+                (sell_col, "v", "red", "Sell"),
             ):
-                trade_ts = df_results[df_results[side] > 0]["timestamp"]
+                trade_ts = df_results[df_results[col] > 0]["timestamp"]
                 matched = trade_ts[trade_ts.isin(price_at.index)]
                 if not matched.empty:
                     ax.scatter(
