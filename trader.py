@@ -40,7 +40,7 @@ class Trader:
         linmodel = linear_regression([int(x) for x in storage[product].keys()], list(storage[product].values()))
         return (linmodel.intercept, linmodel.slope)
 
-    def compute_mid(self, storage, bsort, ssort, stamp):
+    def compute_mid(self, storage, ssort, bsort, stamp):
         if not bsort and not ssort:
             return storage[stamp-100]
         if not bsort:
@@ -60,7 +60,7 @@ class Trader:
         - product is TOMATOES
         - if len(storage[product]) < 2
         """
-        if len(storage[product]) > 50:
+        if len(storage[product]) > 150:
             storage[product].pop(next(iter(storage[product])))
         intercept, slope = self.regression(product, storage)
         prediction = slope * int(state.timestamp) + intercept
@@ -68,11 +68,13 @@ class Trader:
         orders: List[Order] = []  # Order(symbol, price, quantity)
         acceptable_price = prediction  # Participant should calculate this value
 
+        buy_limit = 15
         buy_buffer = 1
         if len(order_depth.sell_orders) != 0:
             for index in range(len(buysorted)):
                 best_ask, best_ask_amount = buysorted[index][0], buysorted[index][1]
-                if int(best_ask) <= acceptable_price - buy_buffer:  # buying
+                if (int(best_ask) <= acceptable_price - buy_buffer and
+                        storage['pos'][product][1] < buy_limit):  # buying
                     print("BUY", str(-best_ask_amount) + "x", best_ask)
                     orders.append(Order(product, best_ask, -best_ask_amount))
                     self.update_storage(storage, best_ask, -best_ask_amount, product)
@@ -80,10 +82,12 @@ class Trader:
                     break
 
         sell_buffer = 1
+        sell_limit = -15
         if len(order_depth.buy_orders) != 0:
             for index in range(len(sellsorted)):
                 best_bid, best_bid_amount = sellsorted[index][0], sellsorted[index][1]
-                if int(best_bid) >= acceptable_price + sell_buffer:  # shorting
+                if (int(best_bid) >= acceptable_price + sell_buffer and
+                        storage['pos'][product][1] > sell_limit):  # shorting
                     print("SELL", str(best_bid_amount) + "x", best_bid)
                     orders.append(Order(product, best_bid, -best_bid_amount))
                     self.update_storage(storage, best_bid, -best_bid_amount, product)
@@ -100,41 +104,30 @@ class Trader:
         - product is EMERALDS
         - if len(storage[product]) < 2
         """
-        if len(storage[product]) > 500:
-            storage[product].pop(next(iter(storage[product])))
-        intercept, slope = self.regression(product, storage)
-        prediction = slope * int(state.timestamp) + intercept
-
         orders: List[Order] = []  # Order(symbol, price, quantity)
-        acceptable_price = prediction  # Participant should calculate this value
+        current_pos = state.position.get(product, 0)
+        middle = 10000  # Participant should calculate this value
 
-        buy_buffer = 0
-        buy_limit = 15
-        if len(order_depth.sell_orders) != 0:
-            for index in range(len(buysorted)):
-                best_ask, best_ask_amount = buysorted[index][0], buysorted[index][1]
-                if (int(best_ask) <= acceptable_price - buy_buffer and
-                        storage['pos'][product][1] < buy_limit):  # buying
-                    print("BUY", str(-best_ask_amount) + "x", best_ask)
-                    orders.append(Order(product, best_ask, -best_ask_amount))
-                    self.update_storage(storage, best_ask, -best_ask_amount, product)
-                else:
-                    break
-
-        sell_buffer = 0
+        sell_buffer = 1
         sell_limit = -15
-        if len(order_depth.buy_orders) != 0:
-            for index in range(len(sellsorted)):
-                best_bid, best_bid_amount = sellsorted[index][0], sellsorted[index][1]
-                if (int(best_bid) >= acceptable_price + sell_buffer and
-                        storage['pos'][product][1] > sell_limit):  # shorting
-                    print("SELL", str(best_bid_amount) + "x", best_bid)
-                    orders.append(Order(product, best_bid, -best_bid_amount))
-                    self.update_storage(storage, best_bid, -best_bid_amount, product)
-                else:
-                    break
+        best_ask = sellsorted[0][0]
+        if current_pos > sell_limit:
+            if best_ask > middle:
+                orders.append(Order(product, best_ask - sell_buffer, sell_limit - current_pos))
+            else:
+                orders.append(Order(product, middle + sell_buffer, sell_limit - current_pos))
+
+        buy_buffer = 1
+        buy_limit = 15
+        best_bid = buysorted[0][0]
+        if current_pos < buy_limit:
+            if best_bid < middle:
+                orders.append(Order(product, best_bid + buy_buffer, buy_limit - current_pos))
+            else:
+                orders.append(Order(product, middle - buy_buffer, buy_limit - current_pos))
 
         result[product] = orders
+        print(current_pos)
 
 
     def run(self, state: TradingState):
@@ -152,8 +145,8 @@ class Trader:
         for product in state.order_depths:
             if product == 'TOMATOES':
                 order_depth: OrderDepth = state.order_depths[product]
-                buysorted = sorted(order_depth.sell_orders.items(), key=lambda x: x[0])
-                sellsorted = sorted(order_depth.buy_orders.items(), key=lambda x: x[0], reverse=True)
+                sellsorted = sorted(order_depth.sell_orders.items(), key=lambda x: x[0])
+                buysorted = sorted(order_depth.buy_orders.items(), key=lambda x: x[0], reverse=True)
                 mid = self.compute_mid(storage, buysorted, sellsorted, state.timestamp)
                 storage[product][int(state.timestamp)] = mid
 
@@ -161,20 +154,14 @@ class Trader:
                     break
 
                 #self.trade_tomatoes(state, storage, result, order_depth, buysorted, sellsorted)
-                orders = []
-                result[product] = orders
+                result[product] = []
 
             if product == 'EMERALDS':
                 order_depth: OrderDepth = state.order_depths[product]
-                buysorted = sorted(order_depth.sell_orders.items(), key=lambda x: x[0])
-                sellsorted = sorted(order_depth.buy_orders.items(), key=lambda x: x[0],
-                                    reverse=True)
-
-                mid = self.compute_mid(storage, buysorted, sellsorted, state.timestamp)
-                storage[product][int(state.timestamp)] = mid
-                if len(storage[product]) < 2:
-                    break
+                sellsorted = sorted(order_depth.sell_orders.items(), key=lambda x: x[0])
+                buysorted = sorted(order_depth.buy_orders.items(), key=lambda x: x[0], reverse=True)
                 self.trade_emeralds(state, storage, result, order_depth, buysorted, sellsorted)
+                #result[product] = []
 
         traderData = jsonpickle.encode(storage)
         # No state needed - we check position directly
