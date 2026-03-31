@@ -3,6 +3,8 @@ from __future__ import annotations
 # argparse lets us read command-line arguments like:
 # python file.py prices.csv trades.csv --limits AMETHYSTS=20,STARFRUIT=20
 import argparse
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
 
 # dataclass automatically creates __init__, __repr__, etc.
 # field(default_factory=...) is used for mutable defaults like dicts.
@@ -10,8 +12,6 @@ from dataclasses import dataclass, field
 
 # Typing tools for clearer code and strategy interface definitions.
 from typing import Any, Dict, List, Optional, Protocol, Tuple
-from concurrent.futures import ProcessPoolExecutor
-import multiprocessing
 
 # pandas is used to read and manipulate CSV data.
 import pandas as pd
@@ -130,14 +130,18 @@ class PriceBookLoader:
         required = {"timestamp", "product"}
         missing = required - set(df.columns)
         if missing:
-            raise ValueError(f"Missing required columns in prices CSV: {sorted(missing)}")
+            raise ValueError(
+                f"Missing required columns in prices CSV: {sorted(missing)}"
+            )
 
         df = df.sort_values(["timestamp", "product"]).reset_index(drop=True)
         self._products: List[str] = sorted(df["product"].astype(str).unique().tolist())
 
         # Detect which book-level columns are actually present.
         has_mid = "mid_price" in df.columns
-        level_cols: List[Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]] = []
+        level_cols: List[
+            Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]
+        ] = []
         for lvl in (1, 2, 3):
             bp = f"bid_price_{lvl}" if f"bid_price_{lvl}" in df.columns else None
             bv = f"bid_volume_{lvl}" if f"bid_volume_{lvl}" in df.columns else None
@@ -146,7 +150,9 @@ class PriceBookLoader:
             level_cols.append((bp, bv, ap, av))
 
         # Precompute all snapshots once using itertuples (5-10x faster than iterrows).
-        self._snapshots: List[Tuple[int, Dict[Symbol, OrderDepth], Dict[str, float]]] = []
+        self._snapshots: List[
+            Tuple[int, Dict[Symbol, OrderDepth], Dict[str, float]]
+        ] = []
         for timestamp, group in df.groupby("timestamp", sort=True):
             order_depths: Dict[Symbol, OrderDepth] = {}
             mids: Dict[str, float] = {}
@@ -187,7 +193,9 @@ class MarketTradeLoader:
         required = {"timestamp", "symbol", "price", "quantity"}
         missing = required - set(df.columns)
         if missing:
-            raise ValueError(f"Missing required columns in trades CSV: {sorted(missing)}")
+            raise ValueError(
+                f"Missing required columns in trades CSV: {sorted(missing)}"
+            )
 
         df = df.sort_values(["timestamp", "symbol"]).reset_index(drop=True)
         for col in ("buyer", "seller"):
@@ -285,9 +293,9 @@ class Backtester:
             # Remove illegal orders that would violate position limits.
             accepted_orders = self._apply_position_limits(position, orders_by_symbol)
 
-            # Execute remaining orders against the visible book.
+            # Execute orders against the visible book, then passively against market trades.
             own_trades_now, cash_delta = self._execute_orders(
-                timestamp, accepted_orders, order_depths
+                timestamp, accepted_orders, order_depths, market_trades
             )
 
             # Update cash account with this step's realized executions.
@@ -405,14 +413,13 @@ class Backtester:
         timestamp: int,
         orders_by_symbol: Dict[str, List[Order]],
         order_depths: Dict[str, OrderDepth],
+        market_trades: Dict[str, List[Trade]],
     ) -> Tuple[Dict[str, List[Trade]], float]:
         """
-        Execute immediately against visible book only.
-
-        Important limitation:
-        - We do NOT simulate later bots trading into our resting quotes.
-        - We only match our submitted orders against the visible book
-          from the prices CSV at the current timestamp.
+        Execute orders in two passes per symbol:
+          1. Aggressive: sweep our orders against the visible order book.
+          2. Passive: fill any remaining quantity against market trades at
+             prices that cross our limit (simulates BOTs hitting our resting quotes).
         """
         own_trades: Dict[str, List[Trade]] = {}
         cash_delta = 0.0
@@ -427,33 +434,38 @@ class Backtester:
             # Sort bids from highest to lowest price.
             bids = sorted(depth.buy_orders.items(), key=lambda x: x[0], reverse=True)
 
+            # Build a mutable pool of market-trade volume for passive fills.
+            # Each entry is [price, remaining_qty].  Shared across all orders
+            # for this symbol so we don't double-fill from the same trade.
+            mkt_sell_pool = sorted(
+                [[t.price, t.quantity] for t in market_trades.get(symbol, [])],
+                key=lambda x: x[0],
+            )  # ascending price — used when we want to buy passively
+            mkt_buy_pool = sorted(
+                [[t.price, t.quantity] for t in market_trades.get(symbol, [])],
+                key=lambda x: x[0],
+                reverse=True,
+            )  # descending price — used when we want to sell passively
+
             for order in orders:
                 # Amount still left to execute.
                 remaining = abs(order.quantity)
 
+                # ----------------------------------------------------------
                 # BUY ORDER LOGIC
+                # ----------------------------------------------------------
                 if order.quantity > 0:
+                    # Pass 1: aggressive — sweep asks in the book.
                     ask_index = 0
-
-                    # Sweep upward through asks while the order can still trade.
                     while remaining > 0 and ask_index < len(asks):
                         ask_price, ask_volume_signed = asks[ask_index]
-
-                        # If the ask price is above our bid limit, stop.
                         if ask_price > order.price:
                             break
-
-                        # Available size at this ask level.
                         available = abs(ask_volume_signed)
-
                         if available <= 0:
                             ask_index += 1
                             continue
-
-                        # Fill either all remaining quantity or all available size.
                         fill = min(remaining, available)
-
-                        # Record our trade.
                         trades.append(
                             Trade(
                                 symbol=symbol,
@@ -464,43 +476,51 @@ class Backtester:
                                 timestamp=timestamp,
                             )
                         )
-
-                        # Buying spends cash.
                         cash_delta -= fill * ask_price
-
-                        # Reduce the remaining quantity in our order.
                         remaining -= fill
-
-                        # Reduce remaining size at that ask level.
                         asks[ask_index] = (ask_price, -(available - fill))
-
-                        # Move to next ask if this level is fully exhausted.
                         if available - fill == 0:
                             ask_index += 1
 
-                # SELL ORDER LOGIC
-                else:
-                    bid_index = 0
+                    # Pass 2: passive — someone sold into the market at <= our bid.
+                    for entry in mkt_sell_pool:
+                        if remaining <= 0:
+                            break
+                        mkt_price, mkt_qty = entry
+                        if mkt_price > order.price:
+                            break  # pool is sorted ascending; no cheaper trades remain
+                        if mkt_qty <= 0:
+                            continue
+                        fill = min(remaining, mkt_qty)
+                        trades.append(
+                            Trade(
+                                symbol=symbol,
+                                price=mkt_price,
+                                quantity=fill,
+                                buyer="SUBMISSION",
+                                seller="BOT",
+                                timestamp=timestamp,
+                            )
+                        )
+                        cash_delta -= fill * mkt_price
+                        remaining -= fill
+                        entry[1] -= fill  # consume from shared pool
 
-                    # Sweep downward through bids while the order can still trade.
+                # ----------------------------------------------------------
+                # SELL ORDER LOGIC
+                # ----------------------------------------------------------
+                else:
+                    # Pass 1: aggressive — sweep bids in the book.
+                    bid_index = 0
                     while remaining > 0 and bid_index < len(bids):
                         bid_price, bid_volume = bids[bid_index]
-
-                        # If the bid price is below our ask limit, stop.
                         if bid_price < order.price:
                             break
-
-                        # Available size at this bid level.
                         available = bid_volume
-
                         if available <= 0:
                             bid_index += 1
                             continue
-
-                        # Fill either all remaining quantity or all available size.
                         fill = min(remaining, available)
-
-                        # Record our trade.
                         trades.append(
                             Trade(
                                 symbol=symbol,
@@ -511,19 +531,35 @@ class Backtester:
                                 timestamp=timestamp,
                             )
                         )
-
-                        # Selling receives cash.
                         cash_delta += fill * bid_price
-
-                        # Reduce remaining quantity in our sell order.
                         remaining -= fill
-
-                        # Reduce remaining size at that bid level.
                         bids[bid_index] = (bid_price, available - fill)
-
-                        # Move to next bid if this level is fully exhausted.
                         if available - fill == 0:
                             bid_index += 1
+
+                    # Pass 2: passive — someone bought from the market at >= our ask.
+                    for entry in mkt_buy_pool:
+                        if remaining <= 0:
+                            break
+                        mkt_price, mkt_qty = entry
+                        if mkt_price < order.price:
+                            break  # pool is sorted descending; no richer trades remain
+                        if mkt_qty <= 0:
+                            continue
+                        fill = min(remaining, mkt_qty)
+                        trades.append(
+                            Trade(
+                                symbol=symbol,
+                                price=mkt_price,
+                                quantity=fill,
+                                buyer="BOT",
+                                seller="SUBMISSION",
+                                timestamp=timestamp,
+                            )
+                        )
+                        cash_delta += fill * mkt_price
+                        remaining -= fill
+                        entry[1] -= fill  # consume from shared pool
 
             own_trades[symbol] = trades
 
