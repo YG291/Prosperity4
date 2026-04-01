@@ -2,3 +2,5 @@
 (buy, sell prices) using jsonpickle)
 2. fair value moving avg
 3. better way to compute buffer, buy/sell/hold decisions
+
+edit buy buffer to be middle - mean(best_bid) *some frac

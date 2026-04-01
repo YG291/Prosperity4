@@ -124,17 +124,17 @@ class Trader:
         middle = int(storage["sort"][1])  # Participant should calculate this value
         # print(f"arr: {storage["sort"]}\nmid: middle {middle}")
         sell_buffer = 1
-        sell_limit = -15
+        sell_limit = -80
         best_ask = sellsorted[0][0]
         if current_pos > sell_limit:
             if best_ask > middle:
                 orders.append(Order(product, best_ask - sell_buffer, sell_limit - current_pos))
             else:
                 orders.append(Order(product, middle + sell_buffer, sell_limit - current_pos))
-
         buy_buffer = 1
-        buy_limit = 15
+        buy_limit = 80
         best_bid = buysorted[0][0]
+        middle - best_bid
         if current_pos < buy_limit:
             if best_bid < middle:
                 orders.append(Order(product, best_bid + buy_buffer, buy_limit - current_pos))
