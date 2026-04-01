@@ -6,6 +6,22 @@ import statistics
 from statistics import linear_regression
 
 class Trader:
+    def b_insert(self, val, arr:list, q):
+        left, right = 0, len(arr) - 1
+        while left <= right:
+            mid = (left + right) // 2
+
+            if arr[mid] == val:
+                arr = arr[:mid] + [mid]*q + arr[mid:]
+                return
+            elif arr[mid] < val:
+                left = mid + 1
+            else:
+                right = mid - 1
+        arr.append(val)
+
+    def get_median(self, arr):
+        return arr[len(arr) // 2]
 
     def bid(self):
         return 15
@@ -96,7 +112,6 @@ class Trader:
 
         result[product] = orders
 
-
     def trade_emeralds(self, state: TradingState, storage, result, order_depth,
                        buysorted, sellsorted, product = 'EMERALDS'):
         """
@@ -106,8 +121,8 @@ class Trader:
         """
         orders: List[Order] = []  # Order(symbol, price, quantity)
         current_pos = state.position.get(product, 0)
-        middle = 10000  # Participant should calculate this value
-
+        middle = self.get_median(storage["sort"])  # Participant should calculate this value
+        print(f"arr: {storage["sort"]}\nmid: middle")
         sell_buffer = 1
         sell_limit = -15
         best_ask = sellsorted[0][0]
@@ -141,7 +156,7 @@ class Trader:
             storage = jsonpickle.decode(state.traderData)
         else:
             storage = {"EMERALDS": dict(), "TOMATOES": dict(),
-                       'pos': {"EMERALDS":[0,0],"TOMATOES":[0,0]}}
+                       'pos': {"EMERALDS":[0,0],"TOMATOES":[0,0]}, "store": []}
         for product in state.order_depths:
             if product == 'TOMATOES':
                 order_depth: OrderDepth = state.order_depths[product]
@@ -160,6 +175,8 @@ class Trader:
                 order_depth: OrderDepth = state.order_depths[product]
                 sellsorted = sorted(order_depth.sell_orders.items(), key=lambda x: x[0])
                 buysorted = sorted(order_depth.buy_orders.items(), key=lambda x: x[0], reverse=True)
+                for trade in state.market_trades["EMERALDS"]:
+                    self.b_insert(trade.price, storage["sort"], trade.quantity)
                 self.trade_emeralds(state, storage, result, order_depth, buysorted, sellsorted)
                 #result[product] = []
 
