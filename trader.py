@@ -6,19 +6,19 @@ import statistics
 from statistics import linear_regression
 
 class Trader:
-    def b_insert(self, val, arr:list, q):
-        left, right = 0, len(arr) - 1
-        while left <= right:
-            mid = (left + right) // 2
+    def b_insert(self, val, arr: list, q):
+        left, right = 0, len(arr)
 
-            if arr[mid] == val:
-                arr = arr[:mid] + [mid]*q + arr[mid:]
-                return
-            elif arr[mid] < val:
+        # binary search for insertion index (lower bound)
+        while left < right:
+            mid = (left + right) // 2
+            if arr[mid] < val:
                 left = mid + 1
             else:
-                right = mid - 1
-        arr.append(val)
+                right = mid
+
+        # insert q copies at correct position
+        return arr[:left] + [val] * q + arr[left:]
 
     def get_median(self, arr):
         return arr[len(arr) // 2]
@@ -121,8 +121,8 @@ class Trader:
         """
         orders: List[Order] = []  # Order(symbol, price, quantity)
         current_pos = state.position.get(product, 0)
-        middle = self.get_median(storage["sort"])  # Participant should calculate this value
-        print(f"arr: {storage["sort"]}\nmid: middle")
+        middle = int(storage["sort"][1])  # Participant should calculate this value
+        # print(f"arr: {storage["sort"]}\nmid: middle {middle}")
         sell_buffer = 1
         sell_limit = -15
         best_ask = sellsorted[0][0]
@@ -156,14 +156,14 @@ class Trader:
             storage = jsonpickle.decode(state.traderData)
         else:
             storage = {"EMERALDS": dict(), "TOMATOES": dict(),
-                       'pos': {"EMERALDS":[0,0],"TOMATOES":[0,0]}, "store": []}
+                       'pos': {"EMERALDS":[0,0],"TOMATOES":[0,0]}, "sort": []}
         for product in state.order_depths:
             if product == 'TOMATOES':
                 order_depth: OrderDepth = state.order_depths[product]
                 sellsorted = sorted(order_depth.sell_orders.items(), key=lambda x: x[0])
                 buysorted = sorted(order_depth.buy_orders.items(), key=lambda x: x[0], reverse=True)
-                mid = self.compute_mid(storage, buysorted, sellsorted, state.timestamp)
-                storage[product][int(state.timestamp)] = mid
+                # mid = self.compute_mid(storage, buysorted, sellsorted, state.timestamp)
+                # storage[product][int(state.timestamp)] = mid
 
                 if len(storage[product]) < 2:
                     break
@@ -175,9 +175,35 @@ class Trader:
                 order_depth: OrderDepth = state.order_depths[product]
                 sellsorted = sorted(order_depth.sell_orders.items(), key=lambda x: x[0])
                 buysorted = sorted(order_depth.buy_orders.items(), key=lambda x: x[0], reverse=True)
-                for trade in state.market_trades["EMERALDS"]:
-                    self.b_insert(trade.price, storage["sort"], trade.quantity)
-                self.trade_emeralds(state, storage, result, order_depth, buysorted, sellsorted)
+                # for trade in state.market_trades.get("EMERALDS", []):
+                #     storage["sort"] = self.b_insert(trade.price, storage["sort"], trade.quantity)
+                # for val, q in buysorted:
+                #     storage["sort"] = self.b_insert(val, storage["sort"], abs(q))
+                # for val, q in sellsorted:
+                #     storage["sort"] = self.b_insert(val, storage["sort"], abs(q))
+                for price, quantity in buysorted:
+                    quantity = abs(quantity)
+                    if len(storage["sort"]) == 0:
+                        storage["sort"] = [1, price]
+                        continue
+                    q, val = (storage["sort"][0], storage["sort"][1])
+                    storage["sort"][0] += quantity
+                    storage["sort"][1] = (quantity * price + val * q) / (q + quantity)
+                for price, quantity in sellsorted:
+                    quantity = abs(quantity)
+                    if len(storage["sort"]) == 0:
+                        storage["sort"] = [1, price]
+                        continue
+                    q, val = (storage["sort"][0], storage["sort"][1])
+                    storage["sort"][0] += quantity
+                    storage["sort"][1] = (quantity * price + val * q) / (q + quantity)
+                for trade in state.market_trades.get("EMERALDS", []):
+                    q, val = (storage["sort"][0], storage["sort"][1])
+                    storage["sort"][0] += trade.quantity
+                    storage["sort"][1] = (trade.quantity*trade.price + val*q)/(q+trade.quantity)
+
+                if not len(storage["sort"]) < 1:
+                    self.trade_emeralds(state, storage, result, order_depth, buysorted, sellsorted)
                 #result[product] = []
 
         traderData = jsonpickle.encode(storage)
