@@ -340,15 +340,22 @@ class Backtester:
                     if mid is not None:
                         mtm += pos * mid
 
-            # Count buy vs sell executions for this step.
+            # Count buy vs sell executions for this step (aggregate + per-product).
             buy_count = 0
             sell_count = 0
-            for trades in own_trades_now.values():
+            per_product_buys: Dict[str, int] = {}
+            per_product_sells: Dict[str, int] = {}
+            for prod, trades in own_trades_now.items():
+                pb = ps = 0
                 for trade in trades:
                     if trade.buyer == "SUBMISSION":
                         buy_count += 1
+                        pb += 1
                     elif trade.seller == "SUBMISSION":
                         sell_count += 1
+                        ps += 1
+                per_product_buys[prod] = pb
+                per_product_sells[prod] = ps
 
             # Save one row of results for this timestamp.
             row = {
@@ -362,9 +369,11 @@ class Backtester:
                 "market_trade_count": sum(len(v) for v in market_trades.values()),
             }
 
-            # Also save per-product positions in separate columns.
+            # Per-product positions and trade counts.
             for product in sorted(position):
                 row[f"pos_{product}"] = position.get(product, 0)
+                row[f"buy_count_{product}"] = per_product_buys.get(product, 0)
+                row[f"sell_count_{product}"] = per_product_sells.get(product, 0)
 
             rows.append(row)
 
