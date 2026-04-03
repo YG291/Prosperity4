@@ -1,4 +1,3 @@
-1. factor in past states (start with just own_trades and then later manually store our portfoilio 
-(buy, sell prices) using jsonpickle)
-2. fair value moving avg
-3. better way to compute buffer, buy/sell/hold decisions
+1. find a way to do inventory management
+2. change the holdings logic from direct if statement to partial buy/sell
+3. MARKET TRADES!
