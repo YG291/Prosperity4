@@ -3,15 +3,13 @@ from __future__ import annotations
 # argparse lets us read command-line arguments like:
 # python file.py prices.csv trades.csv --limits AMETHYSTS=20,STARFRUIT=20
 import argparse
-import multiprocessing
-from concurrent.futures import ProcessPoolExecutor
 
 # dataclass automatically creates __init__, __repr__, etc.
 # field(default_factory=...) is used for mutable defaults like dicts.
 from dataclasses import dataclass, field
 
 # Typing tools for clearer code and strategy interface definitions.
-from typing import Any, Dict, List, Optional, Protocol, Tuple
+from typing import Dict, List, Optional, Protocol, Tuple
 
 # pandas is used to read and manipulate CSV data.
 import pandas as pd
@@ -124,101 +122,123 @@ class PriceBookLoader:
     # into a TradingState-like order book snapshot.
     def __init__(self, csv_path: str):
         # IMC price files are semicolon-delimited, not comma-delimited.
-        df = pd.read_csv(csv_path, sep=";")
+        self.df = pd.read_csv(csv_path, sep=";")
 
         # Make sure essential columns exist.
+        self._validate_columns()
+
+        # Sort by time and product so iteration is stable and predictable.
+        self.df = self.df.sort_values(["timestamp", "product"]).reset_index(drop=True)
+
+    def _validate_columns(self) -> None:
+        # Minimum columns required for this loader to work.
         required = {"timestamp", "product"}
-        missing = required - set(df.columns)
+
+        # Check if any required columns are missing.
+        missing = required - set(self.df.columns)
+
         if missing:
             raise ValueError(
                 f"Missing required columns in prices CSV: {sorted(missing)}"
             )
 
-        df = df.sort_values(["timestamp", "product"]).reset_index(drop=True)
-        self._products: List[str] = sorted(df["product"].astype(str).unique().tolist())
-
-        # Detect which book-level columns are actually present.
-        has_mid = "mid_price" in df.columns
-        level_cols: List[
-            Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]
-        ] = []
-        for lvl in (1, 2, 3):
-            bp = f"bid_price_{lvl}" if f"bid_price_{lvl}" in df.columns else None
-            bv = f"bid_volume_{lvl}" if f"bid_volume_{lvl}" in df.columns else None
-            ap = f"ask_price_{lvl}" if f"ask_price_{lvl}" in df.columns else None
-            av = f"ask_volume_{lvl}" if f"ask_volume_{lvl}" in df.columns else None
-            level_cols.append((bp, bv, ap, av))
-
-        # Precompute all snapshots once using itertuples (5-10x faster than iterrows).
-        self._snapshots: List[
-            Tuple[int, Dict[Symbol, OrderDepth], Dict[str, float]]
-        ] = []
-        for timestamp, group in df.groupby("timestamp", sort=True):
-            order_depths: Dict[Symbol, OrderDepth] = {}
-            mids: Dict[str, float] = {}
-            for row in group.itertuples(index=False):
-                product = str(row.product)
-                depth = OrderDepth()
-                for bp_col, bv_col, ap_col, av_col in level_cols:
-                    if bp_col:
-                        bp = _to_int_if_present(getattr(row, bp_col))
-                        bv = _to_int_if_present(getattr(row, bv_col))
-                        if bp is not None and bv is not None and bv != 0:
-                            depth.buy_orders[bp] = bv
-                    if ap_col:
-                        ap = _to_int_if_present(getattr(row, ap_col))
-                        av = _to_int_if_present(getattr(row, av_col))
-                        if ap is not None and av is not None and av != 0:
-                            depth.sell_orders[ap] = -abs(av)
-                order_depths[product] = depth
-                if has_mid:
-                    mid = getattr(row, "mid_price")
-                    if not pd.isna(mid):
-                        mids[product] = float(mid)
-            self._snapshots.append((int(timestamp), order_depths, mids))
-
     def get_products(self) -> List[str]:
-        return self._products
+        # Return sorted list of all unique products in the price file.
+        return sorted(self.df["product"].astype(str).unique().tolist())
 
     def iter_snapshots(self):
-        return iter(self._snapshots)
+        # Group rows by timestamp so we can reconstruct one market state
+        # per iteration.
+        for timestamp, group in self.df.groupby("timestamp", sort=True):
+            # Dictionary: product -> OrderDepth
+            order_depths: Dict[Symbol, OrderDepth] = {}
+
+            # Dictionary: product -> mid price
+            mids: Dict[str, float] = {}
+
+            # Each row corresponds to one product at the current timestamp.
+            for _, row in group.iterrows():
+                product = str(row["product"])
+                depth = OrderDepth()
+
+                # Read up to 3 book levels from the CSV.
+                # We assume IMC-style columns like:
+                # bid_price_1, bid_volume_1, ask_price_1, ask_volume_1, etc.
+                for level in (1, 2, 3):
+                    bp = _to_int_if_present(row.get(f"bid_price_{level}"))
+                    bv = _to_int_if_present(row.get(f"bid_volume_{level}"))
+                    ap = _to_int_if_present(row.get(f"ask_price_{level}"))
+                    av = _to_int_if_present(row.get(f"ask_volume_{level}"))
+
+                    # Add valid buy levels to the order book.
+                    if bp is not None and bv is not None and bv != 0:
+                        depth.buy_orders[bp] = bv
+
+                    # Add valid sell levels to the order book.
+                    # Sell volumes are stored as negative values by convention.
+                    if ap is not None and av is not None and av != 0:
+                        depth.sell_orders[ap] = -abs(av)
+
+                # Save this product's order book.
+                order_depths[product] = depth
+
+                # If the row contains a mid_price column, store it.
+                if "mid_price" in row and not pd.isna(row["mid_price"]):
+                    mids[product] = float(row["mid_price"])
+
+            # Yield one complete snapshot for this timestamp.
+            yield int(timestamp), order_depths, mids
 
 
 class MarketTradeLoader:
     # Responsible for loading the trades CSV and letting us query
     # all market trades that occurred at a given timestamp.
     def __init__(self, csv_path: str):
-        df = pd.read_csv(csv_path, sep=";")
+        self.df = pd.read_csv(csv_path, sep=";")
+        self._validate_columns()
 
+        # Sort by time and symbol to make processing predictable.
+        self.df = self.df.sort_values(["timestamp", "symbol"]).reset_index(drop=True)
+
+        # Some files may not have buyer/seller columns.
+        # If missing, create them as empty strings.
+        for col in ("buyer", "seller"):
+            if col not in self.df.columns:
+                self.df[col] = ""
+
+    def _validate_columns(self) -> None:
+        # Minimum columns required for trade replay context.
         required = {"timestamp", "symbol", "price", "quantity"}
-        missing = required - set(df.columns)
+        missing = required - set(self.df.columns)
+
         if missing:
             raise ValueError(
                 f"Missing required columns in trades CSV: {sorted(missing)}"
             )
 
-        df = df.sort_values(["timestamp", "symbol"]).reset_index(drop=True)
-        for col in ("buyer", "seller"):
-            if col not in df.columns:
-                df[col] = ""
-
-        # Precompute dict {timestamp: {symbol: [Trade]}} so trades_at is O(1).
-        self._by_timestamp: Dict[int, Dict[str, List[Trade]]] = {}
-        for row in df.itertuples(index=False):
-            ts = int(row.timestamp)
-            symbol = str(row.symbol)
-            trade = Trade(
-                symbol=symbol,
-                price=int(row.price),
-                quantity=int(row.quantity),
-                buyer="" if pd.isna(row.buyer) else str(row.buyer),
-                seller="" if pd.isna(row.seller) else str(row.seller),
-                timestamp=ts,
-            )
-            self._by_timestamp.setdefault(ts, {}).setdefault(symbol, []).append(trade)
-
     def trades_at(self, timestamp: int) -> Dict[str, List[Trade]]:
-        return self._by_timestamp.get(timestamp, {})
+        # Filter the trades dataframe to the current timestamp.
+        ts_rows = self.df[self.df["timestamp"] == timestamp]
+
+        # Dictionary: symbol -> list of Trade objects
+        out: Dict[str, List[Trade]] = {}
+
+        for _, row in ts_rows.iterrows():
+            symbol = str(row["symbol"])
+
+            # Append a Trade object for this symbol.
+            out.setdefault(symbol, []).append(
+                Trade(
+                    symbol=symbol,
+                    price=int(row["price"]),
+                    quantity=int(row["quantity"]),
+                    buyer="" if pd.isna(row["buyer"]) else str(row["buyer"]),
+                    seller="" if pd.isna(row["seller"]) else str(row["seller"]),
+                    timestamp=int(row["timestamp"]),
+                )
+            )
+
+        return out
 
 
 class Backtester:
@@ -293,9 +313,9 @@ class Backtester:
             # Remove illegal orders that would violate position limits.
             accepted_orders = self._apply_position_limits(position, orders_by_symbol)
 
-            # Execute orders against the visible book, then passively against market trades.
+            # Execute remaining orders against the visible book.
             own_trades_now, cash_delta = self._execute_orders(
-                timestamp, accepted_orders, order_depths, market_trades
+                timestamp, accepted_orders, order_depths
             )
 
             # Update cash account with this step's realized executions.
@@ -320,22 +340,15 @@ class Backtester:
                     if mid is not None:
                         mtm += pos * mid
 
-            # Count buy vs sell executions per product for this step.
+            # Count buy vs sell executions for this step.
             buy_count = 0
             sell_count = 0
-            per_product_buys: Dict[str, int] = {}
-            per_product_sells: Dict[str, int] = {}
-            for prod, trades in own_trades_now.items():
-                pb, ps = 0, 0
+            for trades in own_trades_now.values():
                 for trade in trades:
                     if trade.buyer == "SUBMISSION":
                         buy_count += 1
-                        pb += 1
                     elif trade.seller == "SUBMISSION":
                         sell_count += 1
-                        ps += 1
-                per_product_buys[prod] = pb
-                per_product_sells[prod] = ps
 
             # Save one row of results for this timestamp.
             row = {
@@ -349,11 +362,9 @@ class Backtester:
                 "market_trade_count": sum(len(v) for v in market_trades.values()),
             }
 
-            # Also save per-product positions and buy/sell counts.
+            # Also save per-product positions in separate columns.
             for product in sorted(position):
                 row[f"pos_{product}"] = position.get(product, 0)
-                row[f"buy_count_{product}"] = per_product_buys.get(product, 0)
-                row[f"sell_count_{product}"] = per_product_sells.get(product, 0)
 
             rows.append(row)
 
@@ -413,13 +424,14 @@ class Backtester:
         timestamp: int,
         orders_by_symbol: Dict[str, List[Order]],
         order_depths: Dict[str, OrderDepth],
-        market_trades: Dict[str, List[Trade]],
     ) -> Tuple[Dict[str, List[Trade]], float]:
         """
-        Execute orders in two passes per symbol:
-          1. Aggressive: sweep our orders against the visible order book.
-          2. Passive: fill any remaining quantity against market trades at
-             prices that cross our limit (simulates BOTs hitting our resting quotes).
+        Execute immediately against visible book only.
+
+        Important limitation:
+        - We do NOT simulate later bots trading into our resting quotes.
+        - We only match our submitted orders against the visible book
+          from the prices CSV at the current timestamp.
         """
         own_trades: Dict[str, List[Trade]] = {}
         cash_delta = 0.0
@@ -434,33 +446,33 @@ class Backtester:
             # Sort bids from highest to lowest price.
             bids = sorted(depth.buy_orders.items(), key=lambda x: x[0], reverse=True)
 
-            # Single shared pool of market-trade volume for passive fills.
-            # Sorted ascending by price; both buy and sell orders consume from it
-            # so the same trade volume can never be double-filled.
-            mkt_pool = sorted(
-                [[t.price, t.quantity] for t in market_trades.get(symbol, [])],
-                key=lambda x: x[0],
-            )
-
             for order in orders:
                 # Amount still left to execute.
                 remaining = abs(order.quantity)
 
-                # ----------------------------------------------------------
                 # BUY ORDER LOGIC
-                # ----------------------------------------------------------
                 if order.quantity > 0:
-                    # Pass 1: aggressive — sweep asks in the book.
                     ask_index = 0
+
+                    # Sweep upward through asks while the order can still trade.
                     while remaining > 0 and ask_index < len(asks):
                         ask_price, ask_volume_signed = asks[ask_index]
+
+                        # If the ask price is above our bid limit, stop.
                         if ask_price > order.price:
                             break
+
+                        # Available size at this ask level.
                         available = abs(ask_volume_signed)
+
                         if available <= 0:
                             ask_index += 1
                             continue
+
+                        # Fill either all remaining quantity or all available size.
                         fill = min(remaining, available)
+
+                        # Record our trade.
                         trades.append(
                             Trade(
                                 symbol=symbol,
@@ -471,51 +483,43 @@ class Backtester:
                                 timestamp=timestamp,
                             )
                         )
+
+                        # Buying spends cash.
                         cash_delta -= fill * ask_price
+
+                        # Reduce the remaining quantity in our order.
                         remaining -= fill
+
+                        # Reduce remaining size at that ask level.
                         asks[ask_index] = (ask_price, -(available - fill))
+
+                        # Move to next ask if this level is fully exhausted.
                         if available - fill == 0:
                             ask_index += 1
 
-                    # Pass 2: passive — someone sold into the market at <= our bid.
-                    for entry in mkt_pool:
-                        if remaining <= 0:
-                            break
-                        mkt_price, mkt_qty = entry
-                        if mkt_price > order.price:
-                            break  # pool is sorted ascending; no cheaper trades remain
-                        if mkt_qty <= 0:
-                            continue
-                        fill = min(remaining, mkt_qty)
-                        trades.append(
-                            Trade(
-                                symbol=symbol,
-                                price=mkt_price,
-                                quantity=fill,
-                                buyer="SUBMISSION",
-                                seller="BOT",
-                                timestamp=timestamp,
-                            )
-                        )
-                        cash_delta -= fill * mkt_price
-                        remaining -= fill
-                        entry[1] -= fill  # consume from shared pool
-
-                # ----------------------------------------------------------
                 # SELL ORDER LOGIC
-                # ----------------------------------------------------------
                 else:
-                    # Pass 1: aggressive — sweep bids in the book.
                     bid_index = 0
+
+                    # Sweep downward through bids while the order can still trade.
                     while remaining > 0 and bid_index < len(bids):
                         bid_price, bid_volume = bids[bid_index]
+
+                        # If the bid price is below our ask limit, stop.
                         if bid_price < order.price:
                             break
+
+                        # Available size at this bid level.
                         available = bid_volume
+
                         if available <= 0:
                             bid_index += 1
                             continue
+
+                        # Fill either all remaining quantity or all available size.
                         fill = min(remaining, available)
+
+                        # Record our trade.
                         trades.append(
                             Trade(
                                 symbol=symbol,
@@ -526,35 +530,19 @@ class Backtester:
                                 timestamp=timestamp,
                             )
                         )
+
+                        # Selling receives cash.
                         cash_delta += fill * bid_price
+
+                        # Reduce remaining quantity in our sell order.
                         remaining -= fill
+
+                        # Reduce remaining size at that bid level.
                         bids[bid_index] = (bid_price, available - fill)
+
+                        # Move to next bid if this level is fully exhausted.
                         if available - fill == 0:
                             bid_index += 1
-
-                    # Pass 2: passive — someone bought from the market at >= our ask.
-                    for entry in reversed(mkt_pool):
-                        if remaining <= 0:
-                            break
-                        mkt_price, mkt_qty = entry
-                        if mkt_price < order.price:
-                            break  # pool is sorted descending; no richer trades remain
-                        if mkt_qty <= 0:
-                            continue
-                        fill = min(remaining, mkt_qty)
-                        trades.append(
-                            Trade(
-                                symbol=symbol,
-                                price=mkt_price,
-                                quantity=fill,
-                                buyer="BOT",
-                                seller="SUBMISSION",
-                                timestamp=timestamp,
-                            )
-                        )
-                        cash_delta += fill * mkt_price
-                        remaining -= fill
-                        entry[1] -= fill  # consume from shared pool
 
             own_trades[symbol] = trades
 
@@ -726,47 +714,6 @@ class CoolTrader:
         traderData = ""  # No state needed - we check position directly
         conversions = 0
         return result, conversions, traderData
-
-
-def _run_backtest_worker(args: Tuple) -> pd.DataFrame:
-    """Top-level function required for multiprocessing pickling."""
-    price_csv, trade_csv, limits, strategy_cls, strategy_kwargs, mark_to_mid = args
-    engine = Backtester(price_csv, trade_csv, limits, mark_to_mid=mark_to_mid)
-    strategy = strategy_cls(**strategy_kwargs)
-    return engine.run(strategy)
-
-
-def run_parallel_backtests(
-    price_csv: str,
-    trade_csv: str,
-    limits: Dict[str, int],
-    strategy_cls,
-    param_grid: List[Dict[str, Any]],
-    mark_to_mid: bool = True,
-    workers: Optional[int] = None,
-) -> List[pd.DataFrame]:
-    """
-    Run multiple backtests in parallel across CPU cores.
-
-    Each entry in param_grid is a dict of kwargs passed to strategy_cls().
-    Returns a list of result DataFrames in the same order as param_grid.
-
-    Example:
-        results = run_parallel_backtests(
-            "prices.csv", "trades.csv",
-            limits={"RAINFOREST_RESIN": 50},
-            strategy_cls=CoolTrader,
-            param_grid=[{"buy_buffer": 1}, {"buy_buffer": 2}, {"buy_buffer": 3}],
-        )
-    """
-    n_workers = workers or multiprocessing.cpu_count()
-    args_list = [
-        (price_csv, trade_csv, limits, strategy_cls, kwargs, mark_to_mid)
-        for kwargs in param_grid
-    ]
-    with ProcessPoolExecutor(max_workers=n_workers) as executor:
-        results = list(executor.map(_run_backtest_worker, args_list))
-    return results
 
 
 def parse_limits(text: str) -> Dict[str, int]:

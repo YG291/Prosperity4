@@ -82,34 +82,22 @@ class Trader:
         prediction = slope * int(state.timestamp) + intercept
 
         orders: List[Order] = []  # Order(symbol, price, quantity)
-        acceptable_price = prediction  # Participant should calculate this value
+        current_pos = state.position.get(product, 0)
 
+        buy_buffer = int(abs(prediction-storage["buy"][1]))
         buy_limit = 15
-        buy_buffer = 1
         if len(order_depth.sell_orders) != 0:
-            for index in range(len(buysorted)):
-                best_ask, best_ask_amount = buysorted[index][0], buysorted[index][1]
-                if (int(best_ask) <= acceptable_price - buy_buffer and
-                        storage['pos'][product][1] < buy_limit):  # buying
-                    print("BUY", str(-best_ask_amount) + "x", best_ask)
-                    orders.append(Order(product, best_ask, -best_ask_amount))
-                    self.update_storage(storage, best_ask, -best_ask_amount, product)
-                else:
-                    break
-
-        sell_buffer = 1
+            if (current_pos < buy_limit):  # buying
+                orders.append(Order(product, prediction - buy_buffer, buy_limit - current_pos))
+                self.update_storage(storage, prediction, buy_limit - current_pos, product)
+        
+        sell_buffer = int(abs(prediction-storage["sell"][1]))
         sell_limit = -15
         if len(order_depth.buy_orders) != 0:
-            for index in range(len(sellsorted)):
-                best_bid, best_bid_amount = sellsorted[index][0], sellsorted[index][1]
-                if (int(best_bid) >= acceptable_price + sell_buffer and
-                        storage['pos'][product][1] > sell_limit):  # shorting
-                    print("SELL", str(best_bid_amount) + "x", best_bid)
-                    orders.append(Order(product, best_bid, -best_bid_amount))
-                    self.update_storage(storage, best_bid, -best_bid_amount, product)
-                else:
-                    break
-
+            if (current_pos > sell_limit):  # shorting
+                orders.append(Order(product, prediction + sell_buffer, sell_limit - current_pos))
+                self.update_storage(storage, prediction + sell_buffer, sell_limit - current_pos, product)
+        print('tomatoes: '+ str(current_pos))
         result[product] = orders
 
     def trade_emeralds(self, state: TradingState, storage, result, order_depth,
@@ -121,29 +109,35 @@ class Trader:
         """
         orders: List[Order] = []  # Order(symbol, price, quantity)
         current_pos = state.position.get(product, 0)
-        middle = int(storage["sort"][1])  # Participant should calculate this value
-        # print(f"arr: {storage["sort"]}\nmid: middle {middle}")
+        middle = int(storage["sort"][1]) 
         sell_buffer = int(abs(middle-storage["sell"][1]))
         sell_limit = -80
-        best_ask = sellsorted[0][0]
         if current_pos > sell_limit:
-            # if best_ask > middle:
-            #     orders.append(Order(product, best_ask - sell_buffer, sell_limit - current_pos))
-            # else:
             orders.append(Order(product, middle + sell_buffer, sell_limit - current_pos))
         buy_buffer = int(abs(middle-storage["buy"][1]))
-        print(f"sell buff {sell_buffer}, buy buff {buy_buffer}")
         buy_limit = 80
-        best_bid = buysorted[0][0]
-        middle - best_bid
         if current_pos < buy_limit:
-            # if best_bid < middle:
-            #     orders.append(Order(product, best_bid + buy_buffer, buy_limit - current_pos))
-            # else:
             orders.append(Order(product, middle - buy_buffer, buy_limit - current_pos))
+        print('emerald: '+ str(current_pos))
 
         result[product] = orders
-        print(current_pos)
+
+    def _with_market_orders(self, sorted_list: list[tuple], storage):
+        for price, quantity in sorted_list:
+            quantity = abs(quantity)
+            if len(storage["sort"]) == 0:
+                storage["sort"] = [1, price]
+                continue
+            q, val = (storage["sort"][0], storage["sort"][1]) #total order volume, mean of all order offers
+            storage["sort"][0] += quantity
+            storage["sort"][1] = (quantity * price + val * q) / (q + quantity)
+    
+    def _update_best_storage(self, sorted_list, storage, buy_or_sell: str):
+        """best as in records highest bids and lowest asks.
+        """
+        q, val = (storage[buy_or_sell][0], storage[buy_or_sell][1])
+        storage[buy_or_sell][0] += sorted_list[0][1]
+        storage[buy_or_sell][1] = (sorted_list[0][1]*sorted_list[0][0] + val*q)/(q+sorted_list[0][1])
 
 
     def run(self, state: TradingState):
@@ -161,16 +155,33 @@ class Trader:
         for product in state.order_depths:
             if product == 'TOMATOES':
                 order_depth: OrderDepth = state.order_depths[product]
-                sellsorted = sorted(order_depth.sell_orders.items(), key=lambda x: x[0])
-                buysorted = sorted(order_depth.buy_orders.items(), key=lambda x: x[0], reverse=True)
-                # mid = self.compute_mid(storage, buysorted, sellsorted, state.timestamp)
-                # storage[product][int(state.timestamp)] = mid
-
                 if len(storage[product]) < 2:
                     break
-
-                #self.trade_tomatoes(state, storage, result, order_depth, buysorted, sellsorted)
-                result[product] = []
+                for trade in state.market_trades.get("TOMATOES", []):
+                    q, val = (trade.quantity, trade.price)
+                    if q < 0:
+                        order_depth.sell_orders[val] = q
+                    else:
+                        order_depth.buy_orders[val] = q
+                    # this part adds in the market orders to the current order book
+                sellsorted = sorted(order_depth.sell_orders.items(), key=lambda x: x[0])
+                buysorted = sorted(order_depth.buy_orders.items(), key=lambda x: x[0], reverse=True)
+                # each index is price, quantity 
+                self._with_market_orders(buysorted, storage)
+                self._with_market_orders(sellsorted, storage)
+                # computes new mean price of market orders + order book orders
+                if len(storage["buy"]) == 0:
+                    storage["buy"] = [1, buysorted[0][0]]
+                else:
+                    self._update_best_storage(buysorted, storage, 'buy')
+                if len(storage["sell"]) == 0:
+                    storage["sell"] = [1, sellsorted[0][0]]
+                else:
+                    self._update_best_storage(sellsorted, storage, 'sell')
+                    # print(storage)
+                if not len(storage["sort"]) < 1:
+                    self.trade_tomatoes(state, storage, result, order_depth, buysorted, sellsorted)
+                #result[product] = []
 
             if product == 'EMERALDS':
                 order_depth: OrderDepth = state.order_depths[product]
@@ -180,47 +191,22 @@ class Trader:
                         order_depth.sell_orders[val] = q
                     else:
                         order_depth.buy_orders[val] = q
+                    # this part adds in the market orders to the current order book
                 sellsorted = sorted(order_depth.sell_orders.items(), key=lambda x: x[0])
                 buysorted = sorted(order_depth.buy_orders.items(), key=lambda x: x[0], reverse=True)
-                print(sellsorted, buysorted)
-                # for trade in state.market_trades.get("EMERALDS", []):
-                #     storage["sort"] = self.b_insert(trade.price, storage["sort"], trade.quantity)
-                # for val, q in buysorted:
-                #     storage["sort"] = self.b_insert(val, storage["sort"], abs(q))
-                # for val, q in sellsorted:
-                #     storage["sort"] = self.b_insert(val, storage["sort"], abs(q))
-                for price, quantity in buysorted:
-                    quantity = abs(quantity)
-                    if len(storage["sort"]) == 0:
-                        storage["sort"] = [1, price]
-                        continue
-                    q, val = (storage["sort"][0], storage["sort"][1])
-                    storage["sort"][0] += quantity
-                    storage["sort"][1] = (quantity * price + val * q) / (q + quantity)
-                for price, quantity in sellsorted:
-                    quantity = abs(quantity)
-                    if len(storage["sort"]) == 0:
-                        storage["sort"] = [1, price]
-                        continue
-                    q, val = (storage["sort"][0], storage["sort"][1])
-                    storage["sort"][0] += quantity
-                    storage["sort"][1] = (quantity * price + val * q) / (q + quantity)
-                # for trade in state.market_trades.get("EMERALDS", []):
-                #     q, val = (storage["sort"][0], storage["sort"][1])
-                #     storage["sort"][0] += trade.quantity
-                #     storage["sort"][1] = (trade.quantity*trade.price + val*q)/(q+trade.quantity)
+                # each index is price, quantity 
+                self._with_market_orders(buysorted, storage)
+                self._with_market_orders(sellsorted, storage)
+                # computes new mean price of market orders + order book orders
                 if len(storage["buy"]) == 0:
                     storage["buy"] = [1, buysorted[0][0]]
                 else:
-                    q, val = (storage["buy"][0], storage["buy"][1])
-                    storage["buy"][0] += buysorted[0][1]
-                    storage["buy"][1] = (buysorted[0][1]*buysorted[0][0] + val*q)/(q+buysorted[0][1])
+                    self._update_best_storage(buysorted, storage, 'buy')
                 if len(storage["sell"]) == 0:
                     storage["sell"] = [1, sellsorted[0][0]]
                 else:
-                    q, val = (storage["sell"][0], storage["sell"][1])
-                    storage["sell"][0] += sellsorted[0][1]
-                    storage["sell"][1] = (sellsorted[0][1]*sellsorted[0][0] + val*q)/(q+sellsorted[0][1])
+                    self._update_best_storage(sellsorted, storage, 'sell')
+                    # print(storage)
                 if not len(storage["sort"]) < 1:
                     self.trade_emeralds(state, storage, result, order_depth, buysorted, sellsorted)
                 #result[product] = []
