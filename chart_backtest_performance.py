@@ -6,6 +6,7 @@ Usage:
     python chart_backtest_performance.py backtest_results.csv
     python chart_backtest_performance.py backtest_results.csv --save-prefix run1
     python chart_backtest_performance.py backtest_results.csv --no-show
+    python chart_backtest_performance.py backtest_results.csv --candlestick prices.csv
 """
 
 from __future__ import annotations
@@ -22,11 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Chart PnL, positions, and trade activity from a backtest CSV."
     )
-    parser.add_argument(
-        "csv_path",
-        type=Path,
-        help="Path to backtest_results.csv",
-    )
+    parser.add_argument("csv_path", type=Path, help="Path to backtest_results.csv")
     parser.add_argument(
         "--save-prefix",
         type=str,
@@ -63,12 +60,10 @@ def load_results(csv_path: Path) -> pd.DataFrame:
             f"Missing required column(s): {sorted(missing)}. "
             "Expected output from imc_local_backtester.py."
         )
-
-    df = df.sort_values("timestamp").reset_index(drop=True)
-    return df
+    return df.sort_values("timestamp").reset_index(drop=True)
 
 
-def save_or_show(fig: plt.Figure, filename: str | None, no_show: bool) -> None:
+def _save_or_show(fig: plt.Figure, filename: str | None, no_show: bool) -> None:
     if filename:
         fig.savefig(filename, dpi=150, bbox_inches="tight")
         print(f"Saved {filename}")
@@ -78,85 +73,72 @@ def save_or_show(fig: plt.Figure, filename: str | None, no_show: bool) -> None:
         plt.close(fig)
 
 
+def _scatter_trades(
+    ax: plt.Axes,
+    df: pd.DataFrame,
+    ts_col: str,
+    y_col: str,
+    buy_col: str,
+    sell_col: str,
+) -> list[mpatches.Patch]:
+    handles = []
+    for col, marker, color, label in (
+        (buy_col, "^", "green", "Buy"),
+        (sell_col, "v", "red", "Sell"),
+    ):
+        if col not in df.columns:
+            continue
+        rows = df[df[col] > 0]
+        if rows.empty:
+            continue
+        ax.scatter(
+            rows[ts_col], rows[y_col], marker=marker, color=color, s=60, zorder=3
+        )
+        handles.append(mpatches.Patch(color=color, label=label))
+    return handles
+
+
 def plot_total_pnl(df: pd.DataFrame, save_prefix: str, no_show: bool) -> None:
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.plot(df["timestamp"], df["total_pnl"], label="Total PnL", zorder=2)
 
-    legend_handles = []
-    if "buy_count" in df.columns and "sell_count" in df.columns:
-        buys = df[df["buy_count"] > 0]
-        sells = df[df["sell_count"] > 0]
-
-        if not buys.empty:
-            ax.scatter(
-                buys["timestamp"],
-                buys["total_pnl"],
-                marker="^",
-                color="green",
-                s=60,
-                zorder=3,
-                label="Buy",
-            )
-            legend_handles.append(
-                mpatches.Patch(color="green", label="Buy")
-            )
-
-        if not sells.empty:
-            ax.scatter(
-                sells["timestamp"],
-                sells["total_pnl"],
-                marker="v",
-                color="red",
-                s=60,
-                zorder=3,
-                label="Sell",
-            )
-            legend_handles.append(
-                mpatches.Patch(color="red", label="Sell")
-            )
-
-    if legend_handles:
-        ax.legend(handles=legend_handles)
+    handles = _scatter_trades(
+        ax, df, "timestamp", "total_pnl", "buy_count", "sell_count"
+    )
+    if handles:
+        ax.legend(handles=handles)
 
     ax.set_xlabel("Timestamp")
     ax.set_ylabel("Total PnL")
     ax.set_title("Backtest Total PnL")
-
-    filename = f"{save_prefix}_pnl.png" if save_prefix else None
-    save_or_show(fig, filename, no_show)
+    _save_or_show(fig, f"{save_prefix}_pnl.png" if save_prefix else None, no_show)
 
 
 def plot_cash(df: pd.DataFrame, save_prefix: str, no_show: bool) -> None:
-    fig = plt.figure(figsize=(10, 5))
-    plt.plot(df["timestamp"], df["cash"])
-    plt.xlabel("Timestamp")
-    plt.ylabel("Cash")
-    plt.title("Backtest Cash")
-
-    filename = f"{save_prefix}_cash.png" if save_prefix else None
-    save_or_show(fig, filename, no_show)
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(df["timestamp"], df["cash"])
+    ax.set_xlabel("Timestamp")
+    ax.set_ylabel("Cash")
+    ax.set_title("Backtest Cash")
+    _save_or_show(fig, f"{save_prefix}_cash.png" if save_prefix else None, no_show)
 
 
 def plot_mtm(df: pd.DataFrame, save_prefix: str, no_show: bool) -> None:
-    fig = plt.figure(figsize=(10, 5))
-    plt.plot(df["timestamp"], df["mtm"])
-    plt.xlabel("Timestamp")
-    plt.ylabel("Mark-to-Market")
-    plt.title("Backtest MTM")
-
-    filename = f"{save_prefix}_mtm.png" if save_prefix else None
-    save_or_show(fig, filename, no_show)
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(df["timestamp"], df["mtm"])
+    ax.set_xlabel("Timestamp")
+    ax.set_ylabel("Mark-to-Market")
+    ax.set_title("Backtest MTM")
+    _save_or_show(fig, f"{save_prefix}_mtm.png" if save_prefix else None, no_show)
 
 
 def plot_trade_count(df: pd.DataFrame, save_prefix: str, no_show: bool) -> None:
-    fig = plt.figure(figsize=(10, 5))
-    plt.plot(df["timestamp"], df["trade_count"])
-    plt.xlabel("Timestamp")
-    plt.ylabel("Trades")
-    plt.title("Trades per Step")
-
-    filename = f"{save_prefix}_trades.png" if save_prefix else None
-    save_or_show(fig, filename, no_show)
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(df["timestamp"], df["trade_count"])
+    ax.set_xlabel("Timestamp")
+    ax.set_ylabel("Trades")
+    ax.set_title("Trades per Step")
+    _save_or_show(fig, f"{save_prefix}_trades.png" if save_prefix else None, no_show)
 
 
 def plot_positions(df: pd.DataFrame, save_prefix: str, no_show: bool) -> None:
@@ -166,14 +148,14 @@ def plot_positions(df: pd.DataFrame, save_prefix: str, no_show: bool) -> None:
         return
 
     for col in position_cols:
-        fig = plt.figure(figsize=(10, 5))
-        plt.plot(df["timestamp"], df[col])
-        plt.xlabel("Timestamp")
-        plt.ylabel("Position")
-        plt.title(f"Position: {col.removeprefix('pos_')}")
-
+        product = col.removeprefix("pos_")
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.plot(df["timestamp"], df[col])
+        ax.set_xlabel("Timestamp")
+        ax.set_ylabel("Position")
+        ax.set_title(f"Position: {product}")
         filename = f"{save_prefix}_{col.lower()}.png" if save_prefix else None
-        save_or_show(fig, filename, no_show)
+        _save_or_show(fig, filename, no_show)
 
 
 def _draw_candles(ax: plt.Axes, ohlc: pd.DataFrame, ts_col: str, width: float) -> None:
@@ -181,7 +163,7 @@ def _draw_candles(ax: plt.Axes, ohlc: pd.DataFrame, ts_col: str, width: float) -
         ts = row[ts_col]
         color = "green" if row["close"] >= row["open"] else "red"
         body_bottom = min(row["open"], row["close"])
-        body_height = abs(row["close"] - row["open"]) or 0.01  # avoid invisible body
+        body_height = abs(row["close"] - row["open"]) or 0.01
 
         ax.add_patch(
             mpatches.Rectangle(
@@ -192,7 +174,6 @@ def _draw_candles(ax: plt.Axes, ohlc: pd.DataFrame, ts_col: str, width: float) -
                 zorder=2,
             )
         )
-        # Upper and lower wicks
         ax.plot([ts, ts], [row["low"], body_bottom], color=color, linewidth=1, zorder=1)
         ax.plot(
             [ts, ts],
@@ -231,59 +212,70 @@ def plot_candlestick(
             .agg(open="first", high="max", low="min", close="last")
             .reset_index()
         )
-        # Represent each candle by the first timestamp in its bucket
         bucket_start = prod_df.groupby("bucket")["timestamp"].first().reset_index()
         ohlc = ohlc.merge(bucket_start, on="bucket")
 
         fig, ax = plt.subplots(figsize=(12, 6))
         _draw_candles(ax, ohlc, ts_col="timestamp", width=candle_period * 0.7)
 
-        # Overlay buy/sell markers using per-product columns if available,
-        # falling back to aggregate columns for older result files.
-        buy_col = f"buy_count_{product}" if f"buy_count_{product}" in df_results.columns else "buy_count"
-        sell_col = f"sell_count_{product}" if f"sell_count_{product}" in df_results.columns else "sell_count"
+        # Per-product columns take priority; fall back to aggregate for older CSVs.
+        buy_col = (
+            f"buy_count_{product}"
+            if f"buy_count_{product}" in df_results.columns
+            else "buy_count"
+        )
+        sell_col = (
+            f"sell_count_{product}"
+            if f"sell_count_{product}" in df_results.columns
+            else "sell_count"
+        )
 
-        if buy_col in df_results.columns and sell_col in df_results.columns:
-            price_at = prod_df.set_index("timestamp")["mid_price"]
+        price_at = prod_df.set_index("timestamp")["mid_price"]
+        handles = []
+        for col, marker, color, label in (
+            (buy_col, "^", "lime", "Buy"),
+            (sell_col, "v", "red", "Sell"),
+        ):
+            if col not in df_results.columns:
+                continue
+            trade_ts = df_results[df_results[col] > 0]["timestamp"]
+            matched = trade_ts[trade_ts.isin(price_at.index)]
+            if matched.empty:
+                continue
+            ax.scatter(
+                matched,
+                price_at.loc[matched].values,
+                marker=marker,
+                color=color,
+                s=70,
+                zorder=4,
+                edgecolors="black",
+                linewidths=0.5,
+            )
+            handles.append(mpatches.Patch(color=color, label=label))
 
-            for col, marker, color, label in (
-                (buy_col, "^", "lime", "Buy"),
-                (sell_col, "v", "red", "Sell"),
-            ):
-                trade_ts = df_results[df_results[col] > 0]["timestamp"]
-                matched = trade_ts[trade_ts.isin(price_at.index)]
-                if not matched.empty:
-                    ax.scatter(
-                        matched,
-                        price_at.loc[matched].values,
-                        marker=marker,
-                        color=color,
-                        s=70,
-                        zorder=4,
-                        label=label,
-                        edgecolors="black",
-                        linewidths=0.5,
-                    )
-            ax.legend()
+        if handles:
+            ax.legend(handles=handles)
 
         ax.autoscale_view()
         ax.set_xlabel("Timestamp")
         ax.set_ylabel("Price")
         ax.set_title(f"Candlestick: {product}  (period={candle_period})")
 
-        filename = f"{save_prefix}_candle_{str(product).lower()}.png" if save_prefix else None
-        save_or_show(fig, filename, no_show)
+        filename = (
+            f"{save_prefix}_candle_{str(product).lower()}.png" if save_prefix else None
+        )
+        _save_or_show(fig, filename, no_show)
 
 
 def print_summary(df: pd.DataFrame) -> None:
     last = df.iloc[-1]
-
     print("\n=== Summary ===")
-    print(f"Final timestamp: {int(last['timestamp'])}")
-    print(f"Final cash: {last['cash']:.2f}")
-    print(f"Final MTM: {last['mtm']:.2f}")
-    print(f"Final total PnL: {last['total_pnl']:.2f}")
-    print(f"Total trades across steps: {int(df['trade_count'].sum())}")
+    print(f"Final timestamp:  {int(last['timestamp'])}")
+    print(f"Final cash:       {last['cash']:.2f}")
+    print(f"Final MTM:        {last['mtm']:.2f}")
+    print(f"Final total PnL:  {last['total_pnl']:.2f}")
+    print(f"Total trades:     {int(df['trade_count'].sum())}")
 
     position_cols = [col for col in df.columns if col.startswith("pos_")]
     if position_cols:
