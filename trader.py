@@ -37,7 +37,14 @@ class Trader:
         if numsells == 0:
             numsells = 0.2
         return numbuys/numsells
-
+    
+    def long_regression(self, product, storage):
+        prices = storage['trend'][1]
+        x_axis = list(range(len(prices)))
+        if len(prices) < 2:
+            return prices[-1] if prices else 0, 0
+        linmodel = linear_regression(x_axis, prices)
+        return (linmodel.intercept, linmodel.slope)
 
     def regression(self, product, storage):
         prices = list(storage[product]['historical'].values())
@@ -65,7 +72,7 @@ class Trader:
         storage['pos'][product][1] += quantity
 
     def GEOM_trade(self, state: TradingState, storage, result, order_depth,
-                       buysorted, sellsorted, product):
+                       buysorted, sellsorted, product, long_dir):
         """
         Precondition:
         - if len(storage[product]) < 2
@@ -73,20 +80,25 @@ class Trader:
         if len(storage[product]['historical']) > 20:
             storage[product]['historical'].pop(next(iter(storage[product]['historical'])))
         intercept, slope = self.regression(product, storage)
-        current_index = len(storage[product]['historical']) + 10
+        current_index = len(storage[product]['historical']) + 30
         prediction = slope * current_index + intercept
 
         orders: List[Order] = []  # Order(symbol, price, quantity)
         current_pos = state.position.get(product, 0)
+        buy_limit = 80
+        sell_limit = -80
+
+        if long_dir:
+            sell_limit = 0
+        else:
+            buy_limit = 0
 
         buy_buffer = 1 #int(abs(prediction-storage[product]["buy"][1]))//4
-        buy_limit = 80
         if len(order_depth.sell_orders) != 0:
             if (current_pos < buy_limit):  # buying
                 orders.append(Order(product, int(prediction - buy_buffer), buy_limit - current_pos))
         
         sell_buffer = 1 #int(abs(prediction-storage[product]["sell"][1]))//4
-        sell_limit = -80
         if len(order_depth.buy_orders) != 0:
             if (current_pos > sell_limit):  # shorting
                 orders.append(Order(product, int(prediction + sell_buffer), sell_limit - current_pos))
@@ -102,11 +114,11 @@ class Trader:
         orders: List[Order] = []  # Order(symbol, price, quantity)
         current_pos = state.position.get(product, 0)
         middle = int(storage[product]["sort"][1]) 
-        sell_buffer = 1 #int(abs(middle-storage[product]["sell"][1]))//4
+        sell_buffer = int(abs(middle-storage[product]["sell"][1]))//5
         sell_limit = -80
         if current_pos > sell_limit:
             orders.append(Order(product, middle + sell_buffer, sell_limit - current_pos))
-        buy_buffer = 1 #int(abs(middle-storage[product]["buy"][1]))//4
+        buy_buffer = int(abs(middle-storage[product]["buy"][1]))//5
         buy_limit = 80
         if current_pos < buy_limit:
             orders.append(Order(product, middle - buy_buffer, buy_limit - current_pos))
@@ -146,7 +158,7 @@ class Trader:
             storage = jsonpickle.decode(state.traderData)
         else:
             storage = {"ASH_COATED_OSMIUM": {"historical": {}, "sort": [0,0], "buy": [0,0], "sell": [0,0]}, "INTARIAN_PEPPER_ROOT": {"historical": {}, "sort": [0,0], "buy": [0,0], "sell": [0,0]},
-                       'pos': {"ASH_COATED_OSMIUM":[0,0],"INTARIAN_PEPPER_ROOT":[0,0]}}
+                       'pos': {"ASH_COATED_OSMIUM":[0,0],"INTARIAN_PEPPER_ROOT":[0,0]}, 'trend': [[], None]} #list of vals, buyorsell: bool
         for product in state.order_depths:
             order_depth: OrderDepth = state.order_depths[product]
             sellsorted = sorted(order_depth.sell_orders.items(), key=lambda x: x[0])
@@ -168,24 +180,34 @@ class Trader:
             self._with_market_orders(buysorted, storage, product)
             self._with_market_orders(sellsorted, storage, product)
 
-
             self._update_best_storage(buysorted, storage, 'buy', product)
             self._update_best_storage(sellsorted, storage, 'sell', product)
             
+            if product == 'INTARIAN_PEPPER_ROOT' and storage['trend'][1] is None:
+                if len(storage['trend'][0]) < 100:
+                    storage['trend'][0].append(mid)
+                else:
+                    if storage['trend'][1] is None:
+                        intercept, slope = self.long_regression(product, storage)
+                        current_index = len(storage['trend'][0]) + 100
+                        prediction = slope * current_index + intercept
+                        if prediction > storage['trend'][0][len(storage['trend'][1]) - 1]:
+                            storage['trend'][1] = True
+                        else:
+                            storage['trend'][1] = False
+
             if product == 'INTARIAN_PEPPER_ROOT':
                 if len(storage[product]['historical']) < 2:
                     continue
                 if not len(storage[product]["sort"]) < 1:
-                    self.GEOM_trade(state, storage, result, order_depth, buysorted, sellsorted, product)
-                #result[product] = []
+                    self.GEOM_trade(state, storage, result, order_depth, buysorted, sellsorted, product, storage['trend'][1])
                 print(product, state.position.get(product, 0))
 
             if product == 'ASH_COATED_OSMIUM':
-                # if len(storage[product]['historical']) < 2:
-                #     continue
-                # if not len(storage[product]["sort"]) < 1:
-                #     self.MM_trade(state, storage, result, order_depth, buysorted, sellsorted, product)
-                result[product] = []
+                if len(storage[product]['historical']) < 2:
+                    continue
+                if not len(storage[product]["sort"]) < 1:
+                    self.MM_trade(state, storage, result, order_depth, buysorted, sellsorted, product)
                 print(product, state.position.get(product, 0))
 
         traderData = jsonpickle.encode(storage)
