@@ -5,6 +5,7 @@ import jsonpickle
 import statistics
 from statistics import linear_regression
 
+
 class Trader:
     def b_insert(self, val, arr: list, q):
         left, right = 0, len(arr)
@@ -169,32 +170,40 @@ class Trader:
 
             mid = self.compute_mid(storage, buysorted, sellsorted, state.timestamp, product)
             
-            storage[product]["historical"][int(state.timestamp)] = mid
+            if len(storage[product]["historical"]) < 100:
+                storage[product]["historical"][int(state.timestamp)] = mid
 
             for trade in state.market_trades.get(product, []):
                 q, val = (trade.quantity, trade.price)
                 if q < 0:
-                    order_depth.sell_orders[val] = q
+                    order_depth.sell_orders[val] = order_depth.sell_orders.get(val, 0) - q
                 else:
-                    order_depth.buy_orders[val] = q
+                    order_depth.buy_orders[val] = order_depth.buy_orders.get(val, 0) + q
+            sellsorted = sorted(order_depth.sell_orders.items(), key=lambda x: x[0])
+            buysorted = sorted(order_depth.buy_orders.items(), key=lambda x: x[0], reverse=True)
             self._with_market_orders(buysorted, storage, product)
             self._with_market_orders(sellsorted, storage, product)
 
             self._update_best_storage(buysorted, storage, 'buy', product)
             self._update_best_storage(sellsorted, storage, 'sell', product)
-            
+                        
             if product == 'INTARIAN_PEPPER_ROOT' and storage['trend'][1] is None:
                 if len(storage['trend'][0]) < 100:
                     storage['trend'][0].append(mid)
                 else:
-                    if storage['trend'][1] is None:
-                        intercept, slope = self.long_regression(product, storage)
-                        current_index = len(storage['trend'][0]) + 100
-                        prediction = slope * current_index + intercept
-                        if prediction > storage['trend'][0][len(storage['trend'][1]) - 1]:
-                            storage['trend'][1] = True
-                        else:
-                            storage['trend'][1] = False
+                    # Calculate regression on the 100 collected points
+                    x_axis = list(range(len(storage['trend'][0])))
+                    linmodel = linear_regression(x_axis, storage['trend'][0])
+                    intercept, slope = linmodel.intercept, linmodel.slope
+                    
+                    current_index = len(storage['trend'][0])
+                    prediction = slope * (current_index + 1) + intercept
+                    
+                    # Compare prediction to the last actual price in the trend list
+                    if prediction > storage['trend'][0][-1]:
+                        storage['trend'][1] = True
+                    else:
+                        storage['trend'][1] = False
 
             if product == 'INTARIAN_PEPPER_ROOT':
                 if len(storage[product]['historical']) < 2:
@@ -211,5 +220,6 @@ class Trader:
                 print(product, state.position.get(product, 0))
 
         traderData = jsonpickle.encode(storage)
+        print(len(traderData))
         conversions = 0
         return result, conversions, traderData
